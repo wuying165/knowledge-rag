@@ -158,6 +158,22 @@ services:
       retries: 5
       start_period: 40s
 
+  # Neo4j — KG 知识图谱
+  neo4j:
+    image: neo4j:latest
+    container_name: knowledge_hub_neo4j
+    ports:
+      - "7474:7474"   # Web 管理界面
+      - "7687:7687"   # Bolt 协议（代码连接）
+    environment:
+      - NEO4J_AUTH=neo4j/12345678  # 账号：neo4j  密码：12345678
+      - NEO4J_PLUGINS=["apoc"]     # 安装必备插件
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/data:/data
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/logs:/logs
+    restart: unless-stopped
+
 networks:
   default:
     name: common-network

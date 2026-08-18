@@ -1,7 +1,7 @@
 import { IsBoolean, IsEnum, IsOptional, IsString } from 'class-validator';
-import { DocumentStatus } from '../entities/document.entity';
+import { DocumentStatus } from '../document-status';
 
-/** 创建文档 */
+/** 创建文档（status 见 DocumentStatus，开启审核时不允许直接 Published） */
 export class CreateDocumentDto {
   /** 标题 */
   @IsString()

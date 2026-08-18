@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
@@ -23,6 +23,7 @@ import { ExtractionResult } from './types/pipeline.types';
  */
 @Injectable()
 export class ExtractionService {
+  private readonly logger = new Logger(ExtractionService.name);
   /** 单 chunk 最多实体数，防止图爆炸 */
   private readonly maxEntities: number;
   private readonly maxRelations: number;
@@ -51,13 +52,15 @@ export class ExtractionService {
       config.get<string>('LLM_MODEL') ||
       'qwen-plus';
     const timeout = Number(config.get('KG_LLM_TIMEOUT_MS', 60000));
+    const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 60000;
 
     const llm = new ChatOpenAI({
       apiKey,
       model,
       temperature: 0.1,
-      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 60000,
+      timeout: timeoutMs,
       maxRetries: 0,
+      // DashScope 走 Chat Completions，不要切 OpenAI Responses API
       useResponsesApi: false,
       configuration: { baseURL: baseUrl },
     });
@@ -67,6 +70,12 @@ export class ExtractionService {
     });
   }
 
+  /**
+   * 对单个 chunk 做抽取。
+   * @param content chunk 正文
+   * @param heading 所属章节标题（给 LLM 当上下文）
+   * @param documentTitle 文档标题
+   */
   async extract(
     content: string,
     heading: string | null | undefined,
@@ -79,6 +88,9 @@ export class ExtractionService {
     return this.extractByLlm(content, heading, documentTitle);
   }
 
+  /**
+   * LLM 抽取：system 约束规则，user 塞标题+正文（截断 4000 字防超上下文）。
+   */
   private async extractByLlm(
     content: string,
     heading: string | null | undefined,
@@ -96,14 +108,19 @@ export class ExtractionService {
     );
     const user = `文档标题: ${documentTitle}\n章节: ${heading ?? '无'}\n\n内容:\n${content.slice(0, 4000)}`;
 
+    const started = Date.now();
     const parsed = await this.structuredLlm.invoke([
       new SystemMessage(system),
       new HumanMessage(user),
     ]);
+    this.logger.log(
+      `KG 抽取完成：title=${documentTitle}, elapsed=${Date.now() - started}ms, chars=${content.length}, entities=${parsed.entities?.length ?? 0}`,
+    );
 
     return this.toExtractionResult(parsed);
   }
 
+  /** 截断数量、规范化类型、丢掉挂空实体的关系 */
   private toExtractionResult(parsed: KgExtractionLlmOutput): ExtractionResult {
     const entityNames = new Set<string>();
     const entities: ExtractionResult['entities'] = [];

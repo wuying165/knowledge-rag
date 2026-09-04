@@ -215,23 +215,11 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
     search_analyzer: 'ik_smart',
   };
 
-  /** 索引不存在则创建；已有但未配 IK 则删掉重建（须重新发布文档） */
+  /** 索引不存在则创建（title / summary / content 用 IK） */
   private async ensureEsIndex() {
     if (!this.es) return;
     const exists = await this.es.indices.exists({ index: ES_INDEX });
-    if (exists) {
-      const mapping = await this.es.indices.getMapping({ index: ES_INDEX });
-      const title = mapping[ES_INDEX]?.mappings?.properties?.title as
-        | { analyzer?: string }
-        | undefined;
-      if (title?.analyzer === 'ik_max_word') {
-        return;
-      }
-      this.logger.warn(
-        `索引 ${ES_INDEX} 未使用 IK，将删除并重建（请重新发布文档）`,
-      );
-      await this.es.indices.delete({ index: ES_INDEX });
-    }
+    if (exists) return;
 
     await this.es.indices.create({
       index: ES_INDEX,
@@ -249,6 +237,6 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
-    this.logger.log(`已创建 ES 索引：${ES_INDEX}（ik_max_word / ik_smart）`);
+    this.logger.log(`已创建 ES 索引：${ES_INDEX}`);
   }
 }

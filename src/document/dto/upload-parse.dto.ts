@@ -1,7 +1,7 @@
 import { Transform } from 'class-transformer';
 import { IsBoolean, IsOptional, IsString } from 'class-validator';
 
-/** 上传解析接口的可选表单字段 */
+/** 上传解析接口的可选表单字段（作者从 JWT 取，不在表单传） */
 export class UploadParseDto {
   @IsOptional()
   @IsString()
@@ -13,19 +13,11 @@ export class UploadParseDto {
 
   @IsOptional()
   @IsString()
-  authorId?: string;
-
-  @IsOptional()
-  @IsString()
   tags?: string;
 
   @IsOptional()
   @IsString()
   remark?: string;
-
-  @IsOptional()
-  @IsString()
-  createBy?: string;
 
   @IsOptional()
   @Transform(({ value }) => {

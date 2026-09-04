@@ -1,8 +1,8 @@
-# 用户管理测试 curl（第二期）
+# 用户管理测试 curl
 
 含：User CRUD、角色分配、Role CRUD、个人资料/改密/统计。
 
-**第三期未做**：Permission 树、`@RequirePermission()`、用户/角色绑权限、团队管理。
+权限树、细粒度鉴权、团队管理见 `curl-rbac.md`。
 
 需 `admin` 账号 JWT。鉴权见 `curl-auth.md`。
 

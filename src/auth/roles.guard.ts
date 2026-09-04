@@ -10,7 +10,7 @@ import { ROLES_KEY } from './decorators/roles.decorator';
 import { RoleCodeValue } from '../common/constants/roles';
 
 /**
- * 角色守卫（RBAC 简化版）
+ * 角色守卫
  *
  * <p>在 {@link JwtAuthGuard} 之后执行（同为 APP_GUARD，按注册顺序：先 JWT、后 Roles）。</p>
  *

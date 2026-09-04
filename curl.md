@@ -1,5 +1,16 @@
 # Document API 测试 curl
 
+所有接口需 JWT。`authorId` / `createBy` / `updateBy` 由登录用户写入，不要放在请求体。
+
+```bash
+export BASE=http://localhost:3000
+TOKEN=$(curl -s -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"user","password":"123456"}' | jq -r '.accessToken')
+```
+
+权限：列表 `document:list`，创建 `document:create`，编辑/发布 `document:edit`，删除 `document:delete`。预置 `user` 已具备这些码；`admin` 自动放行。
+
 ## 0. 上传文件并解析为 Markdown（创建草稿）
 
 支持格式：`pdf` / `docx` / `xlsx` / `pptx` / `txt` / `md`
@@ -7,10 +18,9 @@
 依赖：RustFS（`docker compose up -d rustfs`）。PDF 内嵌图会上传到 RustFS，并在正文中插入 `![](url)`；原文件也会上传，返回 `fileUrl`。
 
 ```bash
-curl -s -X POST http://localhost:3000/documents/upload/parse \
+curl -s -X POST "$BASE/documents/upload/parse" \
+  -H "Authorization: Bearer $TOKEN" \
   -F 'file=@./sample.xlsx' \
-  -F 'authorId=10001' \
-  -F 'createBy=10001' \
   -F 'tags=导入,xlsx' | jq
 ```
 
@@ -20,7 +30,8 @@ curl -s -X POST http://localhost:3000/documents/upload/parse \
 
 ```bash
 DOC_ID='替换成返回的 documentId'
-curl -s "http://localhost:3000/documents/${DOC_ID}" | jq '{id,title,status,content}'
+curl -s "$BASE/documents/${DOC_ID}" \
+  -H "Authorization: Bearer $TOKEN" | jq '{id,title,status,content}'
 ```
 
 ---
@@ -28,7 +39,8 @@ curl -s "http://localhost:3000/documents/${DOC_ID}" | jq '{id,title,status,conte
 ## 1. 创建文档
 
 ```bash
-curl -s -X POST http://localhost:3000/documents \
+curl -s -X POST "$BASE/documents" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "title": "新员工入职指南（研发中心）",
@@ -39,9 +51,7 @@ curl -s -X POST http://localhost:3000/documents \
     "isPublic": false,
     "remark": "面向校招/社招研发同学，季度复核一次",
     "categoryId": "20001",
-    "teamId": "30001",
-    "authorId": "10001",
-    "createBy": "10001"
+    "teamId": "30001"
   }' | jq
 ```
 
@@ -56,7 +66,8 @@ DOC_ID='替换成返回的id'
 ## 2. 列表（分页 + 标题模糊搜索）
 
 ```bash
-curl -s 'http://localhost:3000/documents?page=1&pageSize=10&title=入职' | jq
+curl -s "$BASE/documents?page=1&pageSize=10&title=入职" \
+  -H "Authorization: Bearer $TOKEN" | jq
 ```
 
 ---
@@ -64,7 +75,8 @@ curl -s 'http://localhost:3000/documents?page=1&pageSize=10&title=入职' | jq
 ## 3. 详情（含正文）
 
 ```bash
-curl -s "http://localhost:3000/documents/${DOC_ID}" | jq
+curl -s "$BASE/documents/${DOC_ID}" \
+  -H "Authorization: Bearer $TOKEN" | jq
 ```
 
 ---
@@ -72,7 +84,8 @@ curl -s "http://localhost:3000/documents/${DOC_ID}" | jq
 ## 4. 更新
 
 ```bash
-curl -s -X PATCH "http://localhost:3000/documents/${DOC_ID}" \
+curl -s -X PATCH "$BASE/documents/${DOC_ID}" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "title": "新员工入职指南（研发中心）v1.1",
@@ -80,8 +93,7 @@ curl -s -X PATCH "http://localhost:3000/documents/${DOC_ID}" \
     "summary": "v1.1：补充远程入职流程、试用期目标模板，并收紧 S1 告警响应时效。",
     "tags": "入职,研发中心,onboarding,内部规范,远程办公",
     "status": 1,
-    "remark": "v1.1 已同步 HRBP 与 IT，下季度再评审",
-    "updateBy": "10001"
+    "remark": "v1.1 已同步 HRBP 与 IT，下季度再评审"
   }' | jq
 ```
 
@@ -89,7 +101,8 @@ curl -s -X PATCH "http://localhost:3000/documents/${DOC_ID}" \
 ## 5. 软删除
 
 ```bash
-curl -s -X DELETE "http://localhost:3000/documents/${DOC_ID}" | jq
+curl -s -X DELETE "$BASE/documents/${DOC_ID}" \
+  -H "Authorization: Bearer $TOKEN" | jq
 ```
 
 ---

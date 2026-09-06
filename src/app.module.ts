@@ -25,6 +25,8 @@ import { StorageModule } from './storage/storage.module';
 import { SearchModule } from './search/search.module';
 import { AiModule } from './ai/ai.module';
 import { GraphModule } from './graph/graph.module';
+import { AiSessionEntity } from './ai/entities/ai-session.entity';
+import { AiMessageEntity } from './ai/entities/ai-message.entity';
 
 @Module({
   imports: [
@@ -70,6 +72,8 @@ import { GraphModule } from './graph/graph.module';
           UserPermissionEntity,
           TeamEntity,
           TeamMemberEntity,
+          AiSessionEntity,
+          AiMessageEntity,
         ],
         synchronize: false,
       }),

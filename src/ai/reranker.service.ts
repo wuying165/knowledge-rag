@@ -79,7 +79,9 @@ export class RerankerService {
         }),
       });
 
-      const body = (await response.json()) as DashScopeRerankResponse;
+      const body = (await response.json()) as DashScopeRerankResponse & {
+        results?: Array<{ index: number; relevance_score: number }>;
+      };
       if (!response.ok) {
         this.logger.warn(
           `Rerank 调用失败：status=${response.status}, code=${body.code ?? ''}, message=${body.message ?? ''}`,
@@ -87,7 +89,7 @@ export class RerankerService {
         return null;
       }
 
-      const results = body.output?.results ?? [];
+      const results = body.output?.results ?? body.results ?? [];
       if (!results.length) {
         this.logger.warn('Rerank 返回空结果，降级为 RRF');
         return null;

@@ -10,7 +10,7 @@ import { Card, Col, Row, Statistic, Table, Tag } from 'antd'
 import { documentApi, userApi } from '../api'
 import type { DocumentItem, UserStats } from '../types'
 import { useAuth } from '../auth'
-import { DOC_STATUS, can, formatTime } from '../utils'
+import { DOC_STATUS, can, formatTime, visibilityMeta } from '../utils'
 import { FileTypeIcon } from '../components/FileTypeIcon'
 
 export default function DashboardPage() {
@@ -82,7 +82,7 @@ export default function DashboardPage() {
         ) : null}
       </Row>
       <div className="kh-page" style={{ marginTop: 16, minHeight: 0 }}>
-        <h3 style={{ marginTop: 0 }}>最近文档</h3>
+        <h3 style={{ marginTop: 0 }}>最近可见文档</h3>
         <Table
           rowKey="id"
           size="middle"
@@ -109,6 +109,14 @@ export default function DashboardPage() {
               render: (status: number) => (
                 <Tag color={DOC_STATUS[status]?.color}>{DOC_STATUS[status]?.label ?? status}</Tag>
               ),
+            },
+            {
+              title: '可见性',
+              width: 110,
+              render: (_: unknown, row: DocumentItem) => {
+                const vis = visibilityMeta(row)
+                return <Tag color={vis.color}>{vis.label}</Tag>
+              },
             },
             { title: '更新时间', dataIndex: 'updatedAt', render: formatTime },
           ]}

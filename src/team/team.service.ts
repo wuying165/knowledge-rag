@@ -26,6 +26,48 @@ export class TeamService {
     private readonly userRepo: Repository<UserEntity>,
   ) {}
 
+  /**
+   * 当前用户可访问的团队 ID（供 AuthUser.teamIds / 文档可见性使用）。
+   * 来源：成员表身份 ∪ 担任负责人；已软删团队不计入。
+   */
+  async listAccessibleTeamIds(userId: string): Promise<string[]> {
+    // 成员表；负责人可能不在成员表，需单独查 kh_team.leader_id
+    const [memberRows, led] = await Promise.all([
+      this.memberRepo
+        .createQueryBuilder('m')
+        .select('m.team_id', 'teamId')
+        .where('m.user_id = :userId', { userId })
+        .getRawMany<{ teamId: string | number }>(),
+      this.teamRepo.find({
+        where: { leaderId: userId, deleted: false },
+        select: ['id'],
+      }),
+    ]);
+    // bigint 可能是 string | number，统一成字符串再去重，避免同一团队出现两次
+    const ids = [
+      ...new Set([
+        ...memberRows.map((row) => String(row.teamId)),
+        ...led.map((row) => String(row.id)),
+      ]),
+    ];
+    if (!ids.length) return [];
+    // 成员记录可能仍指向已软删团队，再按 kh_team.deleted = false 过滤
+    const teams = await this.teamRepo.find({
+      where: { id: In(ids), deleted: false },
+      select: ['id', 'teamName'],
+    });
+    return teams.map((row) => String(row.id));
+  }
+
+  async listMine(userId: string): Promise<TeamEntity[]> {
+    const ids = await this.listAccessibleTeamIds(userId);
+    if (!ids.length) return [];
+    return this.teamRepo.find({
+      where: { id: In(ids), deleted: false },
+      order: { sort: 'ASC', createdAt: 'ASC' },
+    });
+  }
+
   async create(dto: CreateTeamDto) {
     const team = this.teamRepo.create({
       id: nextSnowflakeId(),

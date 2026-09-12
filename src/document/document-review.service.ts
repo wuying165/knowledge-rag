@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -17,6 +18,7 @@ import {
 } from './entities/document-review.entity';
 import { QueryReviewTasksDto } from './dto/review.dto';
 import { AuthUser } from '../auth/auth-user.interface';
+import { canWriteDocument } from './document-access';
 
 /**
  * 文档发布审核服务
@@ -51,6 +53,9 @@ export class DocumentReviewService {
     actor?: AuthUser,
   ): Promise<DocumentEntity> {
     const doc = await this.findDocumentOrThrow(documentId);
+    if (actor && !canWriteDocument(doc, actor)) {
+      throw new ForbiddenException('无权提交该文档审核');
+    }
 
     if (!canSubmitReview(doc.status)) {
       throw new BadRequestException('只有草稿或已发布状态的文档才能提交审核');

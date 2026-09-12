@@ -1,7 +1,14 @@
 import { Client } from '@elastic/elasticsearch';
+import type { estypes } from '@elastic/elasticsearch';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChunkHit, DocumentChunk } from './types/pipeline.types';
+import {
+  ES_CHUNK_VISIBILITY_FIELDS,
+  esVisibilityFilter,
+  wrapEsQuery,
+  type DocumentAccessScope,
+} from '../document/document-access';
 
 /** RAG 分块向量索引名 */
 const CHUNK_INDEX = 'kh_chunk';
@@ -46,6 +53,7 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
         `VectorIndex ES 已连接：${node}, status=${health.status}`,
       );
       await this.createIndexIfNotExists();
+      await this.ensureVisibilityMapping();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`Elasticsearch 不可用，RAG 向量写入将跳过：${message}`);
@@ -55,6 +63,43 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     await this.es?.close();
+  }
+
+  /** 已发布文档只改公开/团队时，批量改 chunk 可见性，不必重算向量 */
+  async updateVisibility(
+    documentId: string,
+    vis: { isPublic: boolean; teamId: string | null; authorId: string | null },
+  ) {
+    if (!this.es) {
+      this.logger.warn(
+        `跳过向量可见性更新（ES 不可用）：documentId=${documentId}`,
+      );
+      return;
+    }
+    try {
+      const result = await this.es.updateByQuery({
+        index: CHUNK_INDEX,
+        refresh: true,
+        query: { term: { document_id: documentId } },
+        script: {
+          source:
+            'ctx._source.is_public = params.is_public; ctx._source.team_id = params.team_id; ctx._source.author_id = params.author_id;',
+          params: {
+            is_public: vis.isPublic,
+            team_id: vis.teamId,
+            author_id: vis.authorId,
+          },
+        },
+      });
+      this.logger.log(
+        `向量块可见性已更新：documentId=${documentId}, updated=${result.updated ?? 0}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `向量块可见性更新失败：documentId=${documentId}, ${message}`,
+      );
+    }
   }
 
   /** 删除某文档全部向量块（发布重建 / 下架时调用）。 */
@@ -128,7 +173,11 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
    * BM25 关键词检索（content + document_title，ik_smart）。
    * ES 不可用时返回 []。
    */
-  async keywordSearch(query: string, topK = 20): Promise<ChunkHit[]> {
+  async keywordSearch(
+    query: string,
+    topK = 20,
+    scope?: DocumentAccessScope,
+  ): Promise<ChunkHit[]> {
     if (!this.es) {
       this.logger.warn('跳过关键词检索（ES 不可用）');
       return [];
@@ -137,17 +186,23 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
     if (!trimmed) return [];
 
     const k = this.clampTopK(topK);
+    const vis = scope
+      ? esVisibilityFilter(scope, ES_CHUNK_VISIBILITY_FIELDS)
+      : null;
     try {
       const response = await this.es.search({
         index: CHUNK_INDEX,
         size: k,
-        query: {
-          multi_match: {
-            query: trimmed,
-            fields: ['document_title^2', 'content'],
-            analyzer: 'ik_smart',
+        query: wrapEsQuery(
+          {
+            multi_match: {
+              query: trimmed,
+              fields: ['document_title^2', 'content'],
+              analyzer: 'ik_smart',
+            },
           },
-        },
+          vis,
+        ) as estypes.QueryDslQueryContainer,
         _source: [
           'chunk_id',
           'document_id',
@@ -168,7 +223,11 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
    * kNN 检索知识块（cosine）。
    * ES 不可用或索引为空时返回 []。
    */
-  async knnSearch(queryVector: number[], topK = 20): Promise<ChunkHit[]> {
+  async knnSearch(
+    queryVector: number[],
+    topK = 20,
+    scope?: DocumentAccessScope,
+  ): Promise<ChunkHit[]> {
     if (!this.es) {
       this.logger.warn('跳过向量检索（ES 不可用）');
       return [];
@@ -176,16 +235,21 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
     if (!queryVector.length) return [];
 
     const k = this.clampTopK(topK);
+    const vis = scope
+      ? esVisibilityFilter(scope, ES_CHUNK_VISIBILITY_FIELDS)
+      : null;
     try {
+      const knn: estypes.KnnSearch = {
+        field: 'embedding',
+        query_vector: queryVector,
+        k,
+        num_candidates: Math.max(k * 10, 50),
+      };
+      if (vis) knn.filter = vis as estypes.QueryDslQueryContainer;
       const response = await this.es.search({
         index: CHUNK_INDEX,
         size: k,
-        knn: {
-          field: 'embedding',
-          query_vector: queryVector,
-          k,
-          num_candidates: Math.max(k * 10, 50),
-        },
+        knn,
         _source: [
           'chunk_id',
           'document_id',
@@ -211,14 +275,15 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
     queryVector?: number[] | null;
     hybridTopK?: number;
     rrfC?: number;
+    scope?: DocumentAccessScope;
   }): Promise<ChunkHit[]> {
     const hybridTopK = this.clampTopK(params.hybridTopK ?? 20);
     const rrfC = params.rrfC && params.rrfC > 0 ? params.rrfC : 60;
 
     const [keywordHits, vectorHits] = await Promise.all([
-      this.keywordSearch(params.query, hybridTopK),
+      this.keywordSearch(params.query, hybridTopK, params.scope),
       params.queryVector?.length
-        ? this.knnSearch(params.queryVector, hybridTopK)
+        ? this.knnSearch(params.queryVector, hybridTopK, params.scope)
         : Promise.resolve([] as ChunkHit[]),
     ]);
 
@@ -332,6 +397,7 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
             category_id: { type: 'keyword' },
             author_id: { type: 'keyword' },
             team_id: { type: 'keyword' },
+            is_public: { type: 'boolean' },
             doc_status: { type: 'integer' },
             publish_time: { type: 'date' },
             indexed_at: { type: 'date' },
@@ -357,6 +423,24 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** 已有索引补可见性字段（旧 mapping 没有 is_public） */
+  private async ensureVisibilityMapping() {
+    if (!this.es) return;
+    try {
+      await this.es.indices.putMapping({
+        index: CHUNK_INDEX,
+        properties: {
+          is_public: { type: 'boolean' },
+          author_id: { type: 'keyword' },
+          team_id: { type: 'keyword' },
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`kh_chunk 可见性 mapping 更新失败：${message}`);
+    }
+  }
+
   private buildDocMap(chunk: DocumentChunk): Record<string, unknown> {
     const doc: Record<string, unknown> = {
       chunk_id: chunk.chunkId,
@@ -369,6 +453,7 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
       category_id: chunk.categoryId ?? null,
       author_id: chunk.authorId ?? null,
       team_id: chunk.teamId ?? null,
+      is_public: chunk.isPublic ?? false,
       doc_status: chunk.docStatus ?? null,
       publish_time: chunk.publishTime ?? null,
       indexed_at: new Date().toISOString(),

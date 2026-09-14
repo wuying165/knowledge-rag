@@ -8,6 +8,8 @@ import { nextSnowflakeId } from '../common/snowflake-id';
 import { AiSessionEntity } from './entities/ai-session.entity';
 import { AiMessageEntity } from './entities/ai-message.entity';
 import type { ChatSource } from './chat.types';
+import { ChatShortMemoryService } from './chat-short-memory.service';
+import { ChatLongMemoryService } from './chat-long-memory.service';
 import {
   CreateSessionDto,
   QuerySessionDto,
@@ -21,6 +23,8 @@ export class ChatSessionService {
   constructor(
     @InjectEntityManager()
     private readonly em: EntityManager,
+    private readonly shortMemory: ChatShortMemoryService,
+    private readonly longMemory: ChatLongMemoryService,
   ) {}
 
   async pageMine(userId: string, query: QuerySessionDto) {
@@ -64,6 +68,8 @@ export class ChatSessionService {
     await this.getOwned(userId, id);
     await this.em.delete(AiMessageEntity, { sessionId: id });
     await this.em.delete(AiSessionEntity, { id });
+    await this.shortMemory.clear(userId, id);
+    await this.longMemory.clearSession(userId, id);
     return { message: '已删除' };
   }
 
@@ -73,6 +79,17 @@ export class ChatSessionService {
       where: { sessionId },
       order: { createdAt: 'ASC', id: 'ASC' },
     });
+  }
+
+  /** 最近 N 条，时间正序，供 Redis miss 时回填工作窗口 */
+  async listRecentMessages(userId: string, sessionId: string, limit: number) {
+    await this.getOwned(userId, sessionId);
+    const rows = await this.em.find(AiMessageEntity, {
+      where: { sessionId },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: Math.max(limit, 1),
+    });
+    return rows.reverse();
   }
 
   /**

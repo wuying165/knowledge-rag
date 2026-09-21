@@ -10,6 +10,104 @@ import {
   type DocumentAccessScope,
 } from '../document/document-access';
 
+/** 对话 RAG 用的图谱命中：实体 + 关系类型 + 来源文档 */
+export type GraphChatHit = {
+  query: string;
+  entities: Array<{
+    name: string;
+    type: string | null;
+    description: string | null;
+  }>;
+  relations: Array<{ source: string; relation: string; target: string }>;
+  documents: Array<{ documentId: string; title: string }>;
+};
+
+/** 给模型看的图谱上下文：只写关系与来源，不当制度原文。 */
+export function formatGraphContext(hit: GraphChatHit): string {
+  if (!hit.entities.length && !hit.relations.length) return '';
+  const lines: string[] = [];
+  if (hit.relations.length) {
+    lines.push('关系：');
+    for (const rel of hit.relations) {
+      lines.push(`- ${rel.source} → ${rel.target}（${rel.relation}）`);
+    }
+  } else {
+    lines.push(
+      '实体：' + hit.entities.map((entity) => entity.name).join('、'),
+    );
+  }
+  if (hit.documents.length) {
+    const titles = hit.documents
+      .map((doc) => doc.title)
+      .filter(Boolean);
+    if (titles.length) lines.push(`来源文档：${titles.join('；')}`);
+  }
+  return lines.join('\n');
+}
+
+export function formatGraphSystemText(hit: GraphChatHit): string {
+  const body = formatGraphContext(hit);
+  if (!body) return '';
+  return (
+    `【本轮知识图谱】\n${body}\n\n` +
+    '以上只说明实体之间的关系，不能当制度原文；制度/流程以知识库检索资料为准。'
+  );
+}
+
+export function mergeGraphHits(
+  base: GraphChatHit,
+  extra: GraphChatHit,
+): GraphChatHit {
+  const names = new Set(base.entities.map((e) => e.name));
+  const entities = [...base.entities];
+  for (const entity of extra.entities) {
+    if (names.has(entity.name)) continue;
+    names.add(entity.name);
+    entities.push(entity);
+  }
+  const relKeys = new Set(
+    base.relations.map((r) => `${r.source}\t${r.relation}\t${r.target}`),
+  );
+  const relations = [...base.relations];
+  for (const rel of extra.relations) {
+    const key = `${rel.source}\t${rel.relation}\t${rel.target}`;
+    if (relKeys.has(key)) continue;
+    relKeys.add(key);
+    relations.push(rel);
+  }
+  const docIds = new Set(base.documents.map((d) => d.documentId));
+  const documents = [...base.documents];
+  for (const doc of extra.documents) {
+    if (docIds.has(doc.documentId)) continue;
+    docIds.add(doc.documentId);
+    documents.push(doc);
+  }
+  const queries = [...new Set(
+    [...base.query.split('/'), ...extra.query.split('/')]
+      .map((q) => q.trim())
+      .filter(Boolean),
+  )];
+  return { query: queries.join(' / '), entities, relations, documents };
+}
+
+/** 模型常把「发票 报销」写成一项；图匹配要拆成短名，否则对不上节点。 */
+function splitGraphKeywords(keyword: string | string[]): string[] {
+  const seen = new Set<string>();
+  const kws: string[] = [];
+  const parts = Array.isArray(keyword) ? keyword : [keyword];
+  for (const part of parts) {
+    for (const raw of String(part).split(/[\s/]+/)) {
+      const kw = raw.trim();
+      if (!kw) continue;
+      const key = kw.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      kws.push(kw);
+    }
+  }
+  return kws;
+}
+
 /**
  * KG 知识图谱构建
  *
@@ -435,6 +533,134 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`图谱检索失败：${message}`);
       return [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * 对话 RAG：按短实体名找可见实体，再查这些实体之间的关系与来源文档。
+   * 只做相等 / 前缀 / 后缀，避免「发票」CONTAINS 命中整篇制度标题。
+   * 关系、文档用同一 session 顺序查，避免并发共用 session 丢边。
+   */
+  async retrieveForChat(
+    keyword: string | string[],
+    limit = 8,
+    scope?: DocumentAccessScope,
+  ): Promise<GraphChatHit> {
+    const kws = splitGraphKeywords(keyword);
+    const empty: GraphChatHit = {
+      query: kws.join(' / '),
+      entities: [],
+      relations: [],
+      documents: [],
+    };
+    if (!this.driver) {
+      this.logger.warn('跳过图谱对话检索（Neo4j 不可用）');
+      return empty;
+    }
+    if (!kws.length) return empty;
+
+    const cap = Math.min(Math.max(limit, 1), 20);
+    const vis = neo4jAccessParams(scope);
+    const session = this.driver.session();
+    try {
+      // 先找实体：短词对 name/aliases 做相等、前缀、后缀（不用 CONTAINS，避免「发票」命中长标题）
+      const entResult = await session.run(
+        `
+        MATCH (e:KnowledgeEntity)
+        WHERE any(kw IN $kws WHERE
+          toLower(e.name) = toLower(kw)
+          // 《差旅管理办法》去书名号后，可用「差旅」做前缀
+          OR toLower(replace(replace(e.name, '《', ''), '》', '')) STARTS WITH toLower(kw)
+          OR toLower(e.name) ENDS WITH toLower(kw)
+          // 抽取时写入的别名，规则与 name 相同
+          OR any(a IN coalesce(e.aliases, []) WHERE
+            toLower(toString(a)) = toLower(kw)
+            OR toLower(toString(a)) STARTS WITH toLower(kw)
+            OR toLower(toString(a)) ENDS WITH toLower(kw)
+          )
+        )
+        // 非超管：实体必须出现在当前用户可见文档的分块里
+        AND (
+          $unrestricted OR EXISTS {
+            MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e)
+            WHERE ${neo4jDocumentAccessWhere('d')}
+          }
+        )
+        RETURN e.name AS name, e.type AS type, e.description AS description
+        // 全名相等优先，其次前后缀，最后靠别名命中的；同档取更短的名字
+        ORDER BY
+          CASE
+            WHEN any(kw IN $kws WHERE toLower(e.name) = toLower(kw)) THEN 0
+            WHEN any(kw IN $kws WHERE toLower(e.name) STARTS WITH toLower(kw)
+              OR toLower(e.name) ENDS WITH toLower(kw)) THEN 1
+            ELSE 2
+          END,
+          size(e.name)
+        LIMIT $limit
+        `,
+        { kws, limit: neo4j.int(cap), ...vis },
+      );
+      const entities = entResult.records.map((record) => ({
+        name: record.get('name') as string,
+        type: (record.get('type') as string) ?? null,
+        description: (record.get('description') as string) ?? null,
+      }));
+      const names = entities.map((e) => e.name);
+      if (!names.length) {
+        this.logger.log(`图谱对话检索无实体：kws=${kws.join('/')}`);
+        return empty;
+      }
+
+      // 只取本轮命中实体之间的边，不要扩到图上其它节点
+      const relResult = await session.run(
+        `
+        MATCH (a:KnowledgeEntity)-[r:RELATED_TO]->(b:KnowledgeEntity)
+        WHERE a.name IN $names AND b.name IN $names
+        // 边上没写具体关系类型时，展示用「关联」
+        RETURN a.name AS source,
+               coalesce(nullif(r.relation, 'RELATED_TO'), '关联') AS relation,
+               b.name AS target
+        `,
+        { names },
+      );
+      const seen = new Set<string>();
+      const relations: GraphChatHit['relations'] = [];
+      for (const record of relResult.records) {
+        const source = record.get('source') as string;
+        const relation = record.get('relation') as string;
+        const target = record.get('target') as string;
+        const key = `${source}\t${relation}\t${target}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        relations.push({ source, relation, target });
+      }
+
+      // 这些实体来自哪些当前用户可见的文档（给前端/模型当来源，不当制度原文）
+      const docResult = await session.run(
+        `
+        MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e:KnowledgeEntity)
+        WHERE e.name IN $names
+          AND ($unrestricted OR ${neo4jDocumentAccessWhere('d')})
+        RETURN DISTINCT d.id AS documentId, d.title AS title
+        LIMIT 8
+        `,
+        { names, ...vis },
+      );
+      const documents = docResult.records.map((record) => ({
+        documentId: record.get('documentId') as string,
+        title: (record.get('title') as string) ?? '',
+      }));
+
+      this.logger.log(
+        `图谱对话检索：kws=${kws.join('/')} entities=${entities.length} rels=${relations.length}`,
+      );
+      return { query: kws.join(' / '), entities, relations, documents };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`图谱对话检索失败：${message}`);
+      return empty;
     } finally {
       await session.close();
     }

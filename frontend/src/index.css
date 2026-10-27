@@ -393,6 +393,45 @@ body,
   text-align: left;
 }
 
+.kh-doc {
+  margin-top: 16px;
+  color: #1f1f1f;
+  font-size: 15px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.kh-doc img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+}
+
+.kh-doc .kh-md-table-wrap {
+  width: 100%;
+  margin: 12px 0 16px;
+  overflow-x: auto;
+}
+
+.kh-doc .kh-md-table-wrap table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+
+.kh-doc th,
+.kh-doc td {
+  border-color: #e8e8e8;
+  vertical-align: top;
+}
+
+.kh-doc .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .kh-chat-session-item.disabled {
   opacity: 0.55;
   cursor: not-allowed;

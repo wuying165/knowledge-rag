@@ -18,6 +18,7 @@ export default function DocumentsPage() {
   const [total, setTotal] = useState(0)
   const [items, setItems] = useState<DocumentItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [uploading, setUploading] = useState(false)
   const pageSize = 10
 
   async function load(nextPage = page) {
@@ -83,20 +84,28 @@ export default function DocumentsPage() {
             </Button>
             <Upload
               showUploadList={false}
+              disabled={uploading}
               beforeUpload={async (file) => {
+                if (uploading) return false
                 const form = new FormData()
                 form.append('file', file)
+                setUploading(true)
+                const pending = message.loading('正在解析，请留在此页', 0)
                 try {
                   const res = await documentApi.uploadParse(form)
-                  message.success('已解析为草稿，可在编辑页设置公开或团队')
-                  navigate(`/documents/${res.documentId}/edit`)
+                  pending()
+                  message.success('已解析为草稿')
+                  navigate(`/documents/${res.documentId}`)
                 } catch (error) {
+                  pending()
                   message.error(error instanceof ApiError ? error.message : '上传失败')
+                } finally {
+                  setUploading(false)
                 }
                 return false
               }}
             >
-              <Button>上传解析</Button>
+              <Button loading={uploading}>{uploading ? '解析中' : '上传解析'}</Button>
             </Upload>
           </>
         ) : null}

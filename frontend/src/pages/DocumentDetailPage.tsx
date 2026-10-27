@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button, Empty, Popconfirm, Space, Spin, Tag, Typography, message } from 'antd'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { documentApi } from '../api'
 import { ApiError } from '../api/client'
 import type { DocumentItem } from '../types'
@@ -148,9 +147,7 @@ export default function DocumentDetailPage() {
           {doc.summary}
         </Typography.Paragraph>
       ) : null}
-      <div style={{ marginTop: 16 }}>
-        <Markdown remarkPlugins={[remarkGfm]}>{doc.content || ''}</Markdown>
-      </div>
+      <DocumentMarkdown content={doc.content || ''} />
     </div>
   )
 }

@@ -26,8 +26,12 @@ import {
   ChatQueryRewriteService,
   type ChatRoutePlan,
 } from './chat-query-rewrite.service';
-import { retrieveAndGrade, type RetrieveEval } from './agentic-retrieve';
-import { WebSearchService } from './web-search.service';
+import {
+  retrieveAndGrade,
+  type GradedRetrieve,
+  type RetrieveEval,
+} from './agentic-retrieve';
+import { WebSearchService, type WebSearchResult } from './web-search.service';
 import {
   formatGraphContext,
   GraphBuildService,
@@ -39,9 +43,19 @@ import type { AuthUser } from '../auth/auth-user.interface';
 import type { ChatSource } from './chat.types';
 import type { ChatStreamDto } from './dto/chat-stream.dto';
 import type { ChunkHit } from '../pipeline/types/pipeline.types';
+import type { ChatEvalHit, ChatEvalSnapshot } from './eval/eval.types';
+import { CallbackHandler } from '@langfuse/langchain';
+import { isLangfuseEnabled } from '../observability/langfuse';
 
 /** 引用摘录截断长度（字符） */
 const EXCERPT_LEN = 200;
+
+/** 评测记下本轮真实工具调用。线上 streamChat 不传。 */
+type AgentEvalTrace = {
+  retrieves: GradedRetrieve[];
+  graphUsed: boolean;
+  webSnippets: string[];
+};
 
 type KhUIMessage = UIMessage<
   unknown,
@@ -147,6 +161,7 @@ export class AiStreamService {
     writer: UIMessageStreamWriter<KhUIMessage>,
     plan: ChatRoutePlan,
     question: string,
+    trace?: AgentEvalTrace,
   ) {
     if (!this.llm || !this.compactLlm) return undefined;
     const retrieval = this.retrieval;
@@ -182,6 +197,7 @@ export class AiStreamService {
               previousQuery: lastRetrieve?.usedQuery,
             });
             lastRetrieve = result;
+            trace?.retrieves.push(result);
             writer.write({ type: 'data-eval', data: result.eval });
             if (result.eval.reason === 'error') {
               logger.warn(`RAG 检索失败：${result.eval.text}`);
@@ -292,6 +308,7 @@ export class AiStreamService {
               accessFromUser(user),
             );
             writer.write({ type: 'data-graph', data: hit });
+            if (trace) trace.graphUsed = true;
             return {
               query: hit.query,
               entities: hit.entities,
@@ -319,8 +336,11 @@ export class AiStreamService {
     if (plan.allowWeb) {
       tools.push(
         tool(
-          async (input: { query: string; count?: number }) =>
-            search.search(input.query, input.count ?? 5),
+          async (input: { query: string; count?: number }) => {
+            const web = await search.search(input.query, input.count ?? 5);
+            if (trace) trace.webSnippets.push(formatWebSnippet(web));
+            return web;
+          },
           {
             name: 'web_search',
             description:
@@ -355,6 +375,90 @@ export class AiStreamService {
         modelCallLimitMiddleware({ runLimit: 8, exitBehavior: 'end' }),
       ],
     });
+  }
+
+  /**
+   * 与 streamChat 共用同一个 Agent（工具由模型决定）。
+   * 只取最终回答和工具痕迹，不建会话、不写短期/长期记忆。
+   */
+  async runForEval(
+    question: string,
+    topK: number,
+    user: AuthUser,
+  ): Promise<ChatEvalSnapshot> {
+    const trimmed = question.trim();
+    const [plan, memHits] = await Promise.all([
+      this.queryRewrite.classify(trimmed, []),
+      this.longMemory.search(user.userId, undefined, trimmed),
+    ]);
+    const trace: AgentEvalTrace = {
+      retrieves: [],
+      graphUsed: false,
+      webSnippets: [],
+    };
+    const base = {
+      question: trimmed,
+      intent: plan.intent,
+      allowRetrieve: plan.allowRetrieve,
+      allowGraph: plan.allowGraph,
+      allowWeb: plan.allowWeb,
+      graphQueries: plan.graphQueries,
+    };
+    const agent = this.createTurnAgent(
+      user,
+      topK,
+      [],
+      silentWriter(),
+      plan,
+      trimmed,
+      trace,
+    );
+    if (!agent) {
+      return {
+        ...base,
+        answer: '未配置 LLM Key，无法生成回答',
+        retrieveCount: 0,
+        rewritten: false,
+        graphUsed: false,
+        webUsed: false,
+        rawHits: [],
+        gradedHits: [],
+        webSnippet: '',
+      };
+    }
+
+    const memoryMsg = this.longMemory.buildSystemMessage(memHits);
+    const langfuseHandler = isLangfuseEnabled()
+      ? new CallbackHandler({
+          userId: user.userId,
+          tags: ['agentic-rag', 'eval', plan.intent],
+        })
+      : undefined;
+    const result = await agent.invoke(
+      {
+        messages: [
+          ...(memoryMsg ? [memoryMsg] : []),
+          new HumanMessage(trimmed),
+        ],
+      },
+      langfuseHandler ? { callbacks: [langfuseHandler] } : undefined,
+    );
+    const answer =
+      lastAssistantText(result.messages as BaseMessage[]) || '未能生成回答。';
+    const last = trace.retrieves.at(-1);
+    return {
+      ...base,
+      answer,
+      retrieveCount: trace.retrieves.length,
+      rewritten: Boolean(last?.eval.retried),
+      retryQuery: last?.eval.retryQuery,
+      retrieveEval: last?.eval,
+      graphUsed: trace.graphUsed,
+      webUsed: trace.webSnippets.length > 0,
+      rawHits: (last?.rawHits ?? []).map(toEvalHit),
+      gradedHits: trace.retrieves.flatMap((item) => item.hits).map(toEvalHit),
+      webSnippet: trace.webSnippets.join('\n\n'),
+    };
   }
 
   async streamChat(dto: ChatStreamDto, user: AuthUser, res: Response) {
@@ -438,6 +542,13 @@ export class AiStreamService {
         }
 
         const memoryMsg = this.longMemory.buildSystemMessage(memHits);
+        const langfuseHandler = isLangfuseEnabled()
+          ? new CallbackHandler({
+              userId: user.userId,
+              sessionId: session.id,
+              tags: ['agentic-rag', plan.intent],
+            })
+          : undefined;
         const langchainStream = await agent.stream(
           {
             messages: [
@@ -447,7 +558,10 @@ export class AiStreamService {
             ],
           },
           // messages：模型 token/思考；tools：retrieve / web_search，给适配包转成 tool-* 事件
-          { streamMode: ['messages', 'tools'] },
+          {
+            streamMode: ['messages', 'tools'],
+            ...(langfuseHandler ? { callbacks: [langfuseHandler] } : {}),
+          },
         );
 
         writer.merge(
@@ -586,6 +700,58 @@ function lastUserText(
 function titleFromQuestion(question: string) {
   const text = question.replace(/\s+/g, ' ').trim();
   return text.length > 30 ? `${text.slice(0, 30)}…` : text;
+}
+
+function silentWriter(): UIMessageStreamWriter<KhUIMessage> {
+  return {
+    write() {
+      return undefined;
+    },
+    merge() {
+      return undefined;
+    },
+  } as unknown as UIMessageStreamWriter<KhUIMessage>;
+}
+
+function formatWebSnippet(web: WebSearchResult): string {
+  if (web.error) return web.error;
+  if (!web.items.length) return '无结果。';
+  return web.items
+    .map((hit) => `${hit.title}\n${hit.url}\n${hit.snippet}`)
+    .join('\n\n');
+}
+
+function toEvalHit(hit: ChunkHit): ChatEvalHit {
+  const text = hit.content.replace(/\s+/g, ' ').trim();
+  return {
+    documentId: hit.documentId,
+    documentTitle: hit.documentTitle,
+    heading: hit.heading,
+    score: hit.score,
+    excerpt: text.length > 400 ? `${text.slice(0, 400)}...` : text,
+  };
+}
+
+function lastAssistantText(messages: BaseMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.type !== 'ai') continue;
+    const text = messageText(message.content).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function messageText(content: BaseMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (part.type === 'text') return part.text;
+      return '';
+    })
+    .join('');
 }
 
 function excerpt(content: string) {

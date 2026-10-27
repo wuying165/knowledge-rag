@@ -17,7 +17,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "eval:rag": "ts-node -O '{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' -r tsconfig-paths/register src/ai/eval/run-experiment.ts"
   },
   "dependencies": {
     "@ai-sdk/langchain": "^3.0.93",
@@ -26,6 +27,10 @@
     "@langchain/core": "^1.2.9",
     "@langchain/openai": "^1.5.6",
     "@langchain/textsplitters": "^1.0.1",
+    "@langfuse/client": "^5.13.0",
+    "@langfuse/langchain": "^5.13.0",
+    "@langfuse/otel": "^5.13.0",
+    "@langfuse/tracing": "^5.13.0",
     "@nestjs-modules/mailer": "^2.3.7",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
@@ -36,6 +41,8 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/typeorm": "^11.0.3",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-node": "^0.223.0",
     "ai": "^7.0.93",
     "amqp-connection-manager": "^5.0.0",
     "amqplib": "^2.0.1",

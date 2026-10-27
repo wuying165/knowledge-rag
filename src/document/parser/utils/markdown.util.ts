@@ -1,7 +1,15 @@
+/**
+ * 去掉 NUL。PostgreSQL UTF-8 文本拒绝 0x00，MinerU 解析出的列表符有时会变成这个字节。
+ */
+export function stripNullBytes(text: string): string {
+  if (!text || !text.includes('\u0000')) return text;
+  return text.replace(/\u0000/g, '');
+}
+
 /** 规范化 Markdown：统一换行，压缩连续空行，去首尾空白 */
 export function cleanMarkdown(text: string): string {
   if (!text) return '';
-  return text
+  return stripNullBytes(text)
     .replace(/\r\n/g, '\n')
     .replace(/\n{4,}/g, '\n\n\n')
     .trim();

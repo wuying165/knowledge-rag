@@ -31,6 +31,7 @@ import { FileParserService } from './parser/file-parser.service';
 import {
   decodeUploadFilename,
   getExtension,
+  stripNullBytes,
   titleFromFilename,
 } from './parser/utils/markdown.util';
 import { DocumentReviewService } from './document-review.service';
@@ -41,6 +42,8 @@ import {
   canReadDocument,
   canWriteDocument,
 } from './document-access';
+import { CategoryService } from './category.service';
+import { DocumentVersionService } from './document-version.service';
 
 /**
  * 文档服务
@@ -65,6 +68,8 @@ export class DocumentService {
     /** 发布审核：是否需审、提交/通过/驳回 */
     private readonly reviewService: DocumentReviewService,
     private readonly pipeline: PipelineOrchestrator,
+    private readonly categories: CategoryService,
+    private readonly versions: DocumentVersionService,
   ) {}
 
   /**
@@ -89,6 +94,7 @@ export class DocumentService {
       throw new BadRequestException('开启审核时请先创建草稿，再提交发布/审核');
     }
 
+    const categoryId = await this.normalizeCategoryId(dto.categoryId);
     const id = nextSnowflakeId();
     const wordCount = this.countWords(dto.content);
     const status = requestedStatus;
@@ -114,7 +120,7 @@ export class DocumentService {
         title: dto.title,
         contentId,
         summary: dto.summary,
-        categoryId: dto.categoryId,
+        categoryId,
         teamId: dto.teamId,
         authorId: actor.userId,
         coverImage: dto.coverImage,
@@ -131,6 +137,15 @@ export class DocumentService {
       });
 
       const saved = await this.em.save(doc);
+      await this.versions.recordInitial({
+        documentId: id,
+        version: 1,
+        title: dto.title,
+        content: dto.content,
+        summary: dto.summary ?? null,
+        wordCount,
+        userId: actor.userId,
+      });
 
       // 仅 Published 才建索引。需审时创建即 Published 已在上方拒绝，
       // 能走到这里的 Published 一定是免审；草稿不投 MQ。
@@ -191,7 +206,9 @@ export class DocumentService {
     if (query.teamId) {
       qb.andWhere('doc.team_id = :teamId', { teamId: query.teamId });
     }
-    if (query.authorId) {
+    if (query.mine) {
+      qb.andWhere('doc.author_id = :authorId', { authorId: user.userId });
+    } else if (query.authorId) {
       qb.andWhere('doc.author_id = :authorId', { authorId: query.authorId });
     }
     if (query.status !== undefined) {
@@ -204,9 +221,15 @@ export class DocumentService {
       .take(pageSize);
 
     const [items, total] = await qb.getManyAndCount();
+    const names = await this.categories.namesByIds(
+      items.map((item) => item.categoryId).filter((id): id is string => Boolean(id)),
+    );
 
     return {
-      items,
+      items: items.map((item) => ({
+        ...item,
+        categoryName: item.categoryId ? (names.get(item.categoryId) ?? null) : null,
+      })),
       total,
       page,
       pageSize,
@@ -227,9 +250,10 @@ export class DocumentService {
     if (user && !canReadDocument(doc, accessFromUser(user))) {
       throw new ForbiddenException('无权查看该文档');
     }
+    const categoryName = await this.categoryNameOf(doc.categoryId);
 
     if (!withContent) {
-      return doc;
+      return { ...doc, categoryName };
     }
 
     // 通过 content_id 拉取未删除的正文
@@ -238,6 +262,7 @@ export class DocumentService {
       .lean();
     return {
       ...doc,
+      categoryName,
       content: contentDoc?.content ?? '',
     };
   }
@@ -290,26 +315,63 @@ export class DocumentService {
     // —— 正文变更 ——
     if (dto.content !== undefined) {
       contentChanged = true;
+      dto.content = stripNullBytes(dto.content);
       newContent = dto.content;
       const contentSummary =
         dto.summary ?? this.buildContentSummary(dto.content);
-      const result = await this.contentModel.updateOne(
-        { _id: doc.contentId, deleted: false },
-        {
-          $set: {
-            content: dto.content,
-            contentLength: dto.content.length,
-            contentSummary,
-          },
-          $inc: { version: 1 }, // 版本号 +1
-        },
-      );
-      if (result.matchedCount === 0) {
+      const previous = await this.contentModel
+        .findOne({ _id: doc.contentId, deleted: false })
+        .lean();
+      if (!previous) {
         throw new BadRequestException(
           `Document content ${doc.contentId} not found`,
         );
       }
-      doc.wordCount = this.countWords(dto.content);
+      const oldVersion = previous.version && previous.version > 0 ? previous.version : 1;
+      const newVersion = oldVersion + 1;
+      const updated = await this.contentModel
+        .findOneAndUpdate(
+          { _id: doc.contentId, deleted: false },
+          {
+            $set: {
+              content: dto.content,
+              contentLength: dto.content.length,
+              contentSummary,
+              version: newVersion,
+            },
+          },
+          { new: true },
+        )
+        .lean();
+      if (!updated) {
+        throw new BadRequestException(
+          `Document content ${doc.contentId} not found`,
+        );
+      }
+      const nextTitle = dto.title ?? doc.title;
+      const nextSummary = dto.summary ?? doc.summary ?? null;
+      const nextWordCount = this.countWords(dto.content);
+      await this.versions.recordContentChange({
+        previous: {
+          documentId: doc.id,
+          version: oldVersion,
+          title: doc.title,
+          content: previous.content ?? '',
+          summary: doc.summary ?? null,
+          wordCount: doc.wordCount ?? 0,
+          userId: actor.userId,
+        },
+        next: {
+          documentId: doc.id,
+          version: newVersion,
+          title: nextTitle,
+          content: dto.content,
+          summary: nextSummary,
+          wordCount: nextWordCount,
+          userId: actor.userId,
+        },
+      });
+      doc.wordCount = nextWordCount;
     } else if (dto.summary !== undefined) {
       // 只改摘要时，同步 Mongo 侧预览字段
       await this.contentModel.updateOne(
@@ -321,7 +383,9 @@ export class DocumentService {
     // —— 元数据字段（有传才覆盖）——
     if (dto.title !== undefined) doc.title = dto.title;
     if (dto.summary !== undefined) doc.summary = dto.summary;
-    if (dto.categoryId !== undefined) doc.categoryId = dto.categoryId;
+    if (dto.categoryId !== undefined) {
+      doc.categoryId = await this.normalizeCategoryId(dto.categoryId);
+    }
     if (dto.teamId !== undefined) doc.teamId = dto.teamId;
     if (dto.coverImage !== undefined) doc.coverImage = dto.coverImage;
     if (dto.tags !== undefined) doc.tags = dto.tags;
@@ -615,6 +679,19 @@ export class DocumentService {
         );
       }
     }
+  }
+
+  private async normalizeCategoryId(categoryId?: string | null) {
+    const next = categoryId?.trim() || null;
+    if (!next) return null;
+    await this.categories.assertActive(next);
+    return next;
+  }
+
+  private async categoryNameOf(categoryId?: string | null) {
+    if (!categoryId) return null;
+    const names = await this.categories.namesByIds([categoryId]);
+    return names.get(categoryId) ?? null;
   }
 
   /** 从 Mongo 读取正文（详情 / 发布响应） */

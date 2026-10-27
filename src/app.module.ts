@@ -27,6 +27,14 @@ import { AiModule } from './ai/ai.module';
 import { GraphModule } from './graph/graph.module';
 import { AiSessionEntity } from './ai/entities/ai-session.entity';
 import { AiMessageEntity } from './ai/entities/ai-message.entity';
+import { CategoryEntity } from './document/entities/category.entity';
+import { CommentEntity } from './document/entities/comment.entity';
+import { DocumentLikeEntity } from './document/entities/document-like.entity';
+import { DocumentFavoriteEntity } from './document/entities/document-favorite.entity';
+import { DocumentShareEntity } from './document/entities/document-share.entity';
+import { DocumentVersionEntity } from './document/entities/document-version.entity';
+import { NotificationEntity } from './notification/notification.entity';
+import { NotificationModule } from './notification/notification.module';
 
 @Module({
   imports: [
@@ -74,6 +82,13 @@ import { AiMessageEntity } from './ai/entities/ai-message.entity';
           TeamMemberEntity,
           AiSessionEntity,
           AiMessageEntity,
+          CategoryEntity,
+          CommentEntity,
+          DocumentLikeEntity,
+          DocumentFavoriteEntity,
+          DocumentShareEntity,
+          DocumentVersionEntity,
+          NotificationEntity,
         ],
         synchronize: false,
       }),
@@ -87,6 +102,7 @@ import { AiMessageEntity } from './ai/entities/ai-message.entity';
         ),
       }),
     }),
+    NotificationModule,
     DocumentModule,
     AuthModule,
     TeamModule,

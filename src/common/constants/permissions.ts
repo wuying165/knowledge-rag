@@ -7,6 +7,9 @@ export const PermissionCode = {
   documentEdit: 'document:edit',
   documentDelete: 'document:delete',
   documentReview: 'document:review',
+  documentCategory: 'document:category',
+  documentCategoryQuery: 'document:category:query',
+  documentVersion: 'document:version',
   search: 'search',
 } as const;
 

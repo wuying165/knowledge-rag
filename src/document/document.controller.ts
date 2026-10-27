@@ -26,6 +26,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { RequirePermission } from '../auth/decorators/require-permission.decorator';
 import { RoleCode } from '../common/constants/roles';
 import { PermissionCode } from '../common/constants/permissions';
+import { DocumentSocialService } from './document-social.service';
 
 /** 文档接口：JWT + 权限码；审核操作另需 ROLE_REVIEWER / ROLE_ADMIN */
 @Controller('documents')
@@ -33,6 +34,7 @@ export class DocumentController {
   constructor(
     private readonly documentService: DocumentService,
     private readonly reviewService: DocumentReviewService,
+    private readonly social: DocumentSocialService,
   ) {}
 
   /** 创建文档 */
@@ -169,8 +171,10 @@ export class DocumentController {
   /** 查询文档详情（含正文） */
   @Get(':id')
   @RequirePermission(PermissionCode.documentList)
-  findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.documentService.findOne(id, true, user);
+  async findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    const doc = await this.documentService.findOne(id, true, user);
+    const flags = await this.social.flags(id, user.userId);
+    return { ...doc, ...flags };
   }
 
   /** 更新文档 */

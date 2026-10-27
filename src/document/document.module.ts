@@ -10,6 +10,17 @@ import {
 import { FileParserService } from './parser/file-parser.service';
 import { MineruParser } from './parser/mineru.parser';
 import { PipelineModule } from '../pipeline/pipeline.module';
+import { NotificationModule } from '../notification/notification.module';
+import { CategoryService } from './category.service';
+import { CategoryController } from './category.controller';
+import { DocumentSocialService } from './document-social.service';
+import { DocumentShareService } from './document-share.service';
+import { DocumentVersionService } from './document-version.service';
+import { ShareController } from './share.controller';
+import {
+  DocumentEngagementController,
+  FavoriteController,
+} from './document-engagement.controller';
 
 /**
  * 文档模块
@@ -22,13 +33,24 @@ import { PipelineModule } from '../pipeline/pipeline.module';
       { name: DocumentContent.name, schema: DocumentContentSchema },
     ]),
     PipelineModule,
+    NotificationModule,
   ],
-  controllers: [DocumentController],
+  controllers: [
+    DocumentController,
+    CategoryController,
+    ShareController,
+    DocumentEngagementController,
+    FavoriteController,
+  ],
   providers: [
     DocumentService,
     DocumentReviewService,
     FileParserService,
     MineruParser,
+    CategoryService,
+    DocumentSocialService,
+    DocumentShareService,
+    DocumentVersionService,
   ],
   exports: [DocumentService, DocumentReviewService, FileParserService],
 })

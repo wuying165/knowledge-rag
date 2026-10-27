@@ -22,21 +22,10 @@ export class QueryReviewTasksDto {
   pageSize?: number = 20;
 }
 
-/**
- * 审核通过 / 驳回请求体
- * reviewerId、reviewerName 暂由前端传入；接入鉴权后改从登录用户取
- */
+/** 审核通过 / 驳回请求体（审核人信息从 JWT 取，不在 body 传） */
 export class ReviewDecisionDto {
   /** 审核意见（驳回时必填） */
   @IsOptional()
   @IsString()
   reviewComment?: string;
-
-  @IsOptional()
-  @IsString()
-  reviewerId?: string;
-
-  @IsOptional()
-  @IsString()
-  reviewerName?: string;
 }

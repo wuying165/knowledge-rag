@@ -8,6 +8,7 @@ import {
   DocumentContentSchema,
 } from './schemas/document-content.schema';
 import { FileParserService } from './parser/file-parser.service';
+import { MineruParser } from './parser/mineru.parser';
 import { PipelineModule } from '../pipeline/pipeline.module';
 
 /**
@@ -23,7 +24,12 @@ import { PipelineModule } from '../pipeline/pipeline.module';
     PipelineModule,
   ],
   controllers: [DocumentController],
-  providers: [DocumentService, DocumentReviewService, FileParserService],
+  providers: [
+    DocumentService,
+    DocumentReviewService,
+    FileParserService,
+    MineruParser,
+  ],
   exports: [DocumentService, DocumentReviewService, FileParserService],
 })
 export class DocumentModule {}

@@ -118,7 +118,7 @@ const GRADE_PROMPT =
   '\n' +
   '- 切题：同一主题、同一制度/岗位/流程，能支撑作答（不必覆盖每个细节）\n' +
   '- 不切题：只是词沾边（如问加班餐补却命中差旅报销）、或完全另一件事\n' +
-  '- 只根据给定标题和摘录判断，不要假设库里还有别的文档\n' +
+  '- 只根据给定标题和正文判断，不要假设库里还有别的文档\n' +
   '- 输出不要解释字段以外的内容';
 
 /** 不足时换一种问法再查知识库 */
@@ -377,9 +377,8 @@ function summarizeHits(hits: ChunkHit[], limit = 5): string {
     .slice(0, limit)
     .map((hit, i) => {
       const heading = hit.heading ? ` / ${hit.heading}` : '';
-      const snippet = hit.content.replace(/\s+/g, ' ').trim().slice(0, 180);
       const score = Number.isFinite(hit.score) ? hit.score.toFixed(2) : '-';
-      return `${i + 1}. ${hit.documentTitle}${heading}（分=${score}）\n${snippet}`;
+      return `${i + 1}. ${hit.documentTitle}${heading}（分=${score}）\n${hit.content.trim()}`;
     })
     .join('\n');
 }

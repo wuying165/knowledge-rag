@@ -859,11 +859,7 @@ function packRetrieveResult(
       .map((hit, i) => {
         const src = sources[i];
         const heading = hit.heading ? ` / ${hit.heading}` : '';
-        const snippet =
-          hit.content.length > 800
-            ? `${hit.content.slice(0, 800)}...`
-            : hit.content;
-        return `[${src.index}] ${hit.documentTitle}${heading}\n${snippet}`;
+        return `[${src.index}] ${hit.documentTitle}${heading}\n${hit.content}`;
       })
       .join('\n\n'),
     ...extra,

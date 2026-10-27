@@ -1,204 +1,430 @@
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { ChatOpenAI } from '@langchain/openai';
+import { HumanMessage, SystemMessage, type BaseMessage } from '@langchain/core/messages';
+import { HybridRetrievalService } from './hybrid-retrieval.service';
+import { ChunkHit } from '../pipeline/types/pipeline.types';
+import { ChatSessionService } from './chat-session.service';
+import { ChatShortMemoryService } from './chat-short-memory.service';
+import { ChatLongMemoryService } from './chat-long-memory.service';
+import { ChatQueryRewriteService, type ChatIntent } from './chat-query-rewrite.service';
+import { retrieveUntilRelevant } from './agentic-retrieve';
+import { WebSearchService, type WebSearchResult } from './web-search.service';
+import {
+  formatGraphSystemText,
+  GraphBuildService,
+} from '../pipeline/graph-build.service';
+import { accessFromUser } from '../document/document-access';
+import { dbRowsToMessages } from './chat-memory.util';
 import type { AuthUser } from '../auth/auth-user.interface';
-import type { ChunkHit } from '../pipeline/types/pipeline.types';
-import type { ChatQueryRewriteService, HitGrade } from './chat-query-rewrite.service';
-import type { HybridRetrievalService } from './hybrid-retrieval.service';
-import { withObservation } from '../observability/langfuse';
+import type { ChatSource } from './chat.types';
+import type { ChatEvalHit, ChatEvalSnapshot } from './eval/eval.types';
+import { withObservation, withTraceAttrs } from '../observability/langfuse';
 
-/** 推给前端 data-eval；ok 表示资料切题，不是「有条数」。 */
-export type RetrieveEvalReason =
-  /** 首轮检索切题 */
-  | 'ok'
-  /** 改写后再查切题 */
-  | 'retried_ok'
-  /** 首轮无命中 */
-  | 'empty'
-  /** 改写后再查仍无命中 */
-  | 'retried_empty'
-  /** 首轮有命中但不切题 */
-  | 'irrelevant'
-  /** 改写后再查仍不切题 */
-  | 'retried_irrelevant'
-  /** 检索接口失败 */
-  | 'error';
+export type { ChatSource } from './chat.types';
 
-export type RetrieveEval = {
-  /** 是否可作为制度依据 */
-  ok: boolean;
-  reason: RetrieveEvalReason;
-  /** 给过程条看的一句中文 */
-  text: string;
-  /** 是否已经走过改写再查 */
-  retried: boolean;
-  /** 首轮检索词 */
-  query: string;
-  /** 改写后的检索词（仅再查时有） */
-  retryQuery?: string;
+export type ChatOptions = {
+  /** 默认 true：写入会话与记忆。评测脚本关。 */
+  persist?: boolean;
+  /** 附带评测快照 */
+  includeEval?: boolean;
 };
 
-/** 非流式改写循环的返回；rawHits / retrieveCount 给评测快照用。 */
-export type RetrieveLoopResult = {
-  hits: ChunkHit[];
-  rawHits: ChunkHit[];
-  eval: RetrieveEval;
-  usedQuery: string;
-  retrieveCount: number;
+export type ChatResult = {
+  sessionId: string | null;
+  answer: string;
+  sources: ChatSource[];
+  eval?: ChatEvalSnapshot;
 };
 
-export type GradedRetrieve = {
-  /** 原始命中，给改写器用；不切题时不要当制度依据 */
-  rawHits: ChunkHit[];
-  /** 切题才有，给模型引用 */
-  hits: ChunkHit[];
-  grade: HitGrade; // 切题判断原文
-  eval: RetrieveEval; // 推给前端过程条
-  usedQuery: string; // 本轮实际用来检索的词
-};
-
-/** 无命中时的评估占位，不再调模型 */
-const EMPTY_GRADE: HitGrade = { ok: false, reason: 'empty', text: '未检索到资料' };
-
-/** 单次检索 + 切题评估。Agent loop 每次工具调用走这里。 */
-export async function retrieveAndGrade(opts: {
-  question: string; // 用户原问题，评估切题时对照这个
-  query: string; // 本轮检索词（建议词或改写后的词）
-  topK: number; // 返回条数
-  user?: AuthUser; // 可见范围：公开 / 所在团队 / 自己写的
-  retrieval: HybridRetrievalService; // ES 混合检索
-  rewrite: ChatQueryRewriteService; // 只用来 gradeHits，这里不改写
-  retried?: boolean; // 是否已是改写后的第二次检索
-  previousQuery?: string; // 首轮检索词，填 eval.query 用
-}): Promise<GradedRetrieve> {
-  const usedQuery = opts.query.trim() || opts.question;
-  const retried = Boolean(opts.retried);
-  const displayQuery = retried ? opts.previousQuery || usedQuery : usedQuery;
-  const retryQuery = retried ? usedQuery : undefined;
-
-  return withObservation('retrieve-and-grade', async (update) => {
-    try {
-      const rawHits = await opts.retrieval.retrieve(usedQuery, opts.topK, opts.user);
-      const grade = await opts.rewrite.gradeHits(opts.question, rawHits);
-      const result = {
-        rawHits,
-        hits: grade.ok ? rawHits : [],
-        grade,
-        eval: toEval(grade, displayQuery, retried, retryQuery),
-        usedQuery,
-      };
-      update({
-        input: { query: usedQuery, retried },
-        output: {
-          n: rawHits.length,
-          titles: rawHits.map((h) => h.documentTitle),
-          eval: result.eval,
-        },
-      });
-      return result;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const failed = {
-        rawHits: [] as ChunkHit[],
-        hits: [] as ChunkHit[],
-        grade: { ...EMPTY_GRADE, text: `检索失败：${detail}` },
-        eval: {
-          ok: false,
-          reason: 'error' as const,
-          text: retried ? '改写后再次检索失败' : '检索失败',
-          retried,
-          query: displayQuery,
-          retryQuery,
-        },
-        usedQuery,
-      };
-      update({ input: { query: usedQuery }, output: { error: detail } });
-      return failed;
-    }
-  });
-}
+const EXCERPT_LEN = 200; // 引用摘录截断长度（字符）
+const CITATION_RE = /\[(\d+)\]/g; // 回答里的 [1]、[2] 引用编号
 
 /**
- * 无 Agent 时的等价环：查一次 → 评估 → 不足则改写再查一次。
- * 给非流式 /ai/chat 用。
+ * 非流式 Agentic RAG：意图路由 → 知识库与图谱并行检索（不足则改写再查）→ 按需联网 → 作答。
  */
-export async function retrieveUntilRelevant(opts: {
-  question: string; // 用户原问题
-  query: string; // 首轮检索词（一般是意图改写后的建议词）
-  topK: number; // 返回条数
-  user?: AuthUser; // 文档可见范围
-  retrieval: HybridRetrievalService; // ES 混合检索
-  rewrite: ChatQueryRewriteService; // 评估切题 + 不足时改写
-  onEval?: (data: RetrieveEval) => void; // 每次评估后回调（流式可推过程条）
-  onRewrite?: (retryQuery: string) => void; // 即将用新词再查时回调
-}): Promise<RetrieveLoopResult> {
-  const first = await retrieveAndGrade({
-    question: opts.question,
-    query: opts.query,
-    topK: opts.topK,
-    user: opts.user,
-    retrieval: opts.retrieval,
-    rewrite: opts.rewrite,
-  });
-  opts.onEval?.(first.eval);
-  if (first.eval.ok || first.eval.reason === 'error') {
-    return { hits: first.hits, rawHits: first.rawHits, eval: first.eval, usedQuery: first.usedQuery, retrieveCount: 1 };
+@Injectable()
+export class AiChatService {
+  private readonly logger = new Logger(AiChatService.name);
+  private readonly llm?: ChatOpenAI;
+
+  constructor(
+    config: ConfigService,
+    private readonly retrieval: HybridRetrievalService,
+    private readonly sessions: ChatSessionService,
+    private readonly shortMemory: ChatShortMemoryService,
+    private readonly longMemory: ChatLongMemoryService,
+    private readonly queryRewrite: ChatQueryRewriteService,
+    private readonly webSearch: WebSearchService,
+    private readonly graph: GraphBuildService,
+  ) {
+    const apiKey =
+      config.get<string>('OPENAI_API_KEY') ||
+      config.get<string>('LLM_API_KEY') ||
+      config.get<string>('DASHSCOPE_API_KEY') ||
+      undefined;
+    if (!apiKey) {
+      return;
+    }
+
+    const baseUrl =
+      config.get<string>('OPENAI_BASE_URL') ||
+      config.get<string>('LLM_BASE_URL') ||
+      'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const model =
+      config.get<string>('MODEL_NAME') ||
+      config.get<string>('LLM_MODEL') ||
+      'qwen-plus';
+
+    this.llm = new ChatOpenAI({
+      apiKey,
+      model,
+      temperature: 0.2,
+      timeout: Number(config.get('AI_CHAT_TIMEOUT_MS', 60000)),
+      maxRetries: 0,
+      useResponsesApi: false,
+      configuration: { baseURL: baseUrl },
+    });
   }
 
-  const retryQuery = await opts.rewrite.rewriteAfterRetrieve(
-    opts.question,
-    first.usedQuery,
-    first.grade,
-    first.rawHits,
-  );
-  if (!retryQuery) {
-    return { hits: [], rawHits: first.rawHits, eval: first.eval, usedQuery: first.usedQuery, retrieveCount: 1 };
+  async chat(
+    question: string,
+    topK = 5,
+    user?: AuthUser,
+    sessionId?: string,
+    options?: ChatOptions,
+  ): Promise<ChatResult> {
+    const persist = options?.persist !== false;
+    const includeEval = Boolean(options?.includeEval);
+    const trimmed = question.trim();
+    if (!trimmed) {
+      return {
+        sessionId: sessionId ?? null,
+        answer: '请输入问题。',
+        sources: [] as ChatSource[],
+      };
+    }
+
+    return withObservation('ai-chat', (update) =>
+      withTraceAttrs(
+        {
+          userId: user?.userId,
+          sessionId,
+          tags: ['ai-chat', 'agentic-rag'],
+        },
+        () =>
+          this.runChatTurn({
+            trimmed,
+            topK,
+            user,
+            sessionId,
+            persist,
+            includeEval,
+            update,
+          }),
+      ),
+    );
   }
 
-  opts.onRewrite?.(retryQuery);
-  const second = await retrieveAndGrade({
-    question: opts.question,
-    query: retryQuery,
-    topK: opts.topK,
-    user: opts.user,
-    retrieval: opts.retrieval,
-    rewrite: opts.rewrite,
-    retried: true,
-    previousQuery: first.usedQuery,
-  });
-  opts.onEval?.(second.eval);
-  return { hits: second.hits, rawHits: second.rawHits, eval: second.eval, usedQuery: second.usedQuery, retrieveCount: 2 };
+  private async runChatTurn(opts: {
+    trimmed: string;
+    topK: number;
+    user?: AuthUser;
+    sessionId?: string;
+    persist: boolean;
+    includeEval: boolean;
+    update: (fields: Record<string, unknown>) => void;
+  }): Promise<ChatResult> {
+    const { trimmed, topK, user, sessionId, persist, includeEval, update } = opts;
+    const history = user
+      ? await this.loadWorkingHistory(user.userId, sessionId)
+      : [];
+    const plan = await this.queryRewrite.classify(trimmed, history);
+    const memHitsP = user
+      ? this.longMemory.search(user.userId, sessionId, plan.query)
+      : Promise.resolve({ user: [] as string[], session: [] as string[] });
+    // 图谱与知识库同一层：意图确定后再并行检索，不和 classify 抢跑。
+    const access = user ? accessFromUser(user) : undefined;
+    const kbP = plan.allowRetrieve
+      ? retrieveUntilRelevant({
+          question: trimmed,
+          query: plan.query,
+          topK,
+          user,
+          retrieval: this.retrieval,
+          rewrite: this.queryRewrite,
+        })
+      : Promise.resolve(undefined);
+    const graphP =
+      plan.allowGraph && user && access && plan.graphQueries.length
+        ? this.graph.retrieveForChat(plan.graphQueries, 8, access)
+        : Promise.resolve(undefined);
+    const [retrieved, graphHit] = await Promise.all([kbP, graphP]);
+    let hits = [] as ChunkHit[];
+    let kbInsufficient = false;
+    let searchQuery = plan.query || trimmed;
+    if (retrieved) {
+      hits = retrieved.hits;
+      kbInsufficient = !retrieved.eval.ok;
+      searchQuery = retrieved.usedQuery || searchQuery;
+    }
+    const hasGraph = Boolean(
+      graphHit?.entities.length || graphHit?.relations.length,
+    );
+    const web =
+      plan.allowWeb && (!plan.allowRetrieve || kbInsufficient)
+        ? await this.webSearch.search(searchQuery)
+        : undefined;
+    const memHits = await memHitsP;
+
+    const snapshot = (answer: string): ChatEvalSnapshot => ({
+      question: trimmed,
+      answer,
+      intent: plan.intent,
+      allowRetrieve: plan.allowRetrieve,
+      allowGraph: plan.allowGraph,
+      allowWeb: plan.allowWeb,
+      graphQueries: plan.graphQueries,
+      retrieveCount: retrieved?.retrieveCount ?? 0,
+      rewritten: Boolean(retrieved?.eval.retried),
+      retryQuery: retrieved?.eval.retryQuery,
+      retrieveEval: retrieved?.eval,
+      graphUsed: Boolean(graphHit),
+      webUsed: Boolean(web),
+      rawHits: (retrieved?.rawHits ?? []).map(toEvalHit),
+      gradedHits: hits.map(toEvalHit),
+      webSnippet: web
+        ? web.error ||
+          web.items.map((i) => `${i.title}\n${i.url}\n${i.snippet}`).join('\n')
+        : '',
+    });
+
+    const finish = (
+      answer: string,
+      sources: ChatSource[],
+      sid: string | null,
+    ): ChatResult => {
+      const evalSnap = snapshot(answer);
+      update({
+        input: { question: trimmed },
+        output: { answer, intent: plan.intent, eval: retrieved?.eval },
+        metadata: {
+          intent: plan.intent,
+          retrieveCount: evalSnap.retrieveCount,
+          hitTitles: evalSnap.rawHits.map((h) => h.documentTitle),
+        },
+      });
+      return {
+        sessionId: sid,
+        answer,
+        sources,
+        ...(includeEval ? { eval: evalSnap } : {}),
+      };
+    };
+
+    if (plan.intent === 'kb' && kbInsufficient && !hasGraph) {
+      const empty = {
+        answer: '知识库里没有相关内容。',
+        sources: [] as ChatSource[],
+      };
+      const session = persist && user
+        ? await this.sessions.appendTurn(
+            user.userId,
+            sessionId,
+            trimmed,
+            empty.answer,
+            empty.sources,
+          )
+        : null;
+      if (persist && user && session) {
+        await this.shortMemory.appendTurn(
+          user.userId,
+          session.id,
+          history,
+          trimmed,
+          empty.answer,
+        );
+        this.longMemory.rememberTurn(
+          user.userId,
+          session.id,
+          trimmed,
+          empty.answer,
+        );
+      }
+      return finish(
+        empty.answer,
+        empty.sources,
+        session?.id ?? sessionId ?? null,
+      );
+    }
+
+    if (!this.llm) {
+      throw new ServiceUnavailableException(
+        '未配置 OPENAI_API_KEY / LLM_API_KEY / DASHSCOPE_API_KEY，无法生成回答',
+      );
+    }
+
+    const memoryMsg = this.longMemory.buildSystemMessage(memHits);
+    const graphMsg = graphHit ? formatGraphSystemText(graphHit) : '';
+    const parts: string[] = [];
+    if (hits.length) parts.push(`知识库资料：\n${this.buildContext(hits)}`);
+    if (web) parts.push(`联网结果：\n${this.buildWebContext(web)}`);
+    parts.push(`用户问题：${trimmed}`);
+    const userTurn = parts.join('\n\n');
+    const response = await this.llm.invoke([
+      new SystemMessage(
+        this.buildSystemPrompt(plan.intent, Boolean(hits.length), web),
+      ),
+      ...(memoryMsg ? [memoryMsg] : []),
+      ...(graphMsg ? [new SystemMessage(graphMsg)] : []),
+      ...history,
+      new HumanMessage(userTurn),
+    ]);
+
+    const answer =
+      typeof response.content === 'string'
+        ? response.content
+        : JSON.stringify(response.content);
+
+    const sources = this.toCitedSources(answer, hits);
+    this.logger.log(
+      `RAG 对话完成：hits=${hits.length}, cited=${sources.length}, answerLength=${answer.length}`,
+    );
+
+    const session = persist && user
+      ? await this.sessions.appendTurn(
+          user.userId,
+          sessionId,
+          trimmed,
+          answer,
+          sources,
+        )
+      : null;
+
+    if (persist && user && session) {
+      await this.shortMemory.appendTurn(
+        user.userId,
+        session.id,
+        history,
+        trimmed,
+        answer,
+      );
+      void this.longMemory.rememberTurn(
+        user.userId,
+        session.id,
+        trimmed,
+        answer,
+      );
+    }
+
+    return finish(answer, sources, session?.id ?? sessionId ?? null);
+  }
+
+  private async loadWorkingHistory(
+    userId: string,
+    sessionId: string | undefined,
+  ): Promise<BaseMessage[]> {
+    if (!sessionId) return [];
+    const cached = await this.shortMemory.tryLoad(userId, sessionId);
+    if (cached) return cached;
+    const rows = await this.sessions.listRecentMessages(
+      userId,
+      sessionId,
+      this.shortMemory.windowSize,
+    );
+    const history = dbRowsToMessages(rows);
+    if (history.length) {
+      await this.shortMemory.save(userId, sessionId, history);
+    }
+    return history;
+  }
+
+  /** 从回答中抽出 [n]，只返回实际引用的资料；未标注时回退为全部召回（摘录）。 */
+  private toCitedSources(answer: string, hits: ChunkHit[]): ChatSource[] {
+    const cited = new Set<number>();
+    for (const match of answer.matchAll(CITATION_RE)) {
+      const n = Number(match[1]);
+      if (n >= 1 && n <= hits.length) cited.add(n);
+    }
+
+    const indexes =
+      cited.size > 0 ? [...cited].sort((a, b) => a - b) : hits.map((_, i) => i + 1);
+
+    return indexes.map((index) => this.toSource(index, hits[index - 1]));
+  }
+
+  private toSource(index: number, hit: ChunkHit): ChatSource {
+    return {
+      index,
+      documentId: hit.documentId,
+      documentTitle: hit.documentTitle,
+      heading: hit.heading,
+      excerpt: this.excerpt(hit.content),
+      score: hit.score,
+    };
+  }
+
+  private excerpt(content: string): string {
+    const text = content.replace(/\s+/g, ' ').trim();
+    if (text.length <= EXCERPT_LEN) return text;
+    return `${text.slice(0, EXCERPT_LEN)}...`;
+  }
+
+  private buildContext(hits: ChunkHit[]): string {
+    return hits
+      .map((src, i) => {
+        const heading = src.heading ? ` / ${src.heading}` : '';
+        return `[${i + 1}] ${src.documentTitle}${heading}\n${src.content}`;
+      })
+      .join('\n\n');
+  }
+
+  private buildWebContext(web: WebSearchResult): string {
+    if (web.error) return web.error;
+    if (!web.items.length) return '无结果。';
+    return web.items
+      .map((hit, i) => `${i + 1}. ${hit.title}\n${hit.url}\n${hit.snippet}`)
+      .join('\n\n');
+  }
+
+  private buildSystemPrompt(
+    intent: ChatIntent,
+    hasKb: boolean,
+    web?: WebSearchResult,
+  ): string {
+    let prompt =
+      '你是企业知识库助手。结合对话历史和记忆里的用户背景回答。' +
+      '制度/流程以本轮知识库资料为准，不要用记忆替代文档。';
+    if (hasKb) {
+      prompt +=
+        '凡是依据某条资料作出的陈述，必须在句末标注对应编号，如 [1]、[2]。' +
+        '编号必须与资料列表一致，不要标注未使用的编号，不要编造文档标题或链接。';
+    } else if (intent === 'kb' || intent === 'kb_then_web') {
+      prompt += '知识库没有切题资料，不要编造内部制度。';
+    }
+    if (web?.items.length) {
+      prompt += '联网结果只作公开信息补充，用标题+链接说明，不要写成公司内部规定。';
+    }
+    if (intent === 'chitchat' || intent === 'profile') {
+      prompt += '可回应寒暄或个人偏好，不要编造制度。';
+    }
+    prompt += '若资料不足以回答，明确说不知道。回答简洁，必要时列出条目。';
+    return prompt;
+  }
 }
 
-function toEval(
-  grade: HitGrade, // gradeHits 的结果
-  query: string, // 首轮检索词，展示在 eval.query
-  retried: boolean, // 是否改写后再查
-  retryQuery?: string, // 第二次用的词
-): RetrieveEval {
-  if (grade.reason === 'relevant') {
-    return {
-      ok: true,
-      reason: retried ? 'retried_ok' : 'ok',
-      text: retried ? `已改写再查，${grade.text}` : grade.text,
-      retried,
-      query,
-      retryQuery,
-    };
-  }
-  if (grade.reason === 'empty') {
-    return {
-      ok: false,
-      reason: retried ? 'retried_empty' : 'empty',
-      text: retried ? '改写后仍无结果' : grade.text,
-      retried,
-      query,
-      retryQuery,
-    };
-  }
+function toEvalHit(hit: ChunkHit): ChatEvalHit {
+  const text = hit.content.replace(/\s+/g, ' ').trim();
   return {
-    ok: false,
-    reason: retried ? 'retried_irrelevant' : 'irrelevant',
-    text: retried ? `改写后仍不切题：${grade.text}` : grade.text,
-    retried,
-    query,
-    retryQuery,
+    documentId: hit.documentId,
+    documentTitle: hit.documentTitle,
+    heading: hit.heading,
+    score: hit.score,
+    excerpt: text.length > 400 ? `${text.slice(0, 400)}...` : text,
   };
 }
+

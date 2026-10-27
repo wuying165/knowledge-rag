@@ -493,7 +493,7 @@ export class DocumentService {
     return { id, deleted: true };
   }
 
-  /** 上传并解析文件 → 创建草稿文档 */
+  /** 上传并解析文件 → 创建草稿文档。请求在解析完成前不返回。 */
   async uploadAndCreateDocument(
     file: Express.Multer.File,
     meta: UploadParseDto = {},
@@ -548,7 +548,6 @@ export class DocumentService {
     }
 
     const title = titleFromFilename(originalFilename);
-
     const created = await this.create(
       {
         title,
@@ -564,7 +563,11 @@ export class DocumentService {
     );
 
     const previewLen = Math.min(200, parsedContent.length);
-    const result = {
+    this.logger.log(
+      `文件解析并创建文档成功：documentId=${created.id}, title=${title}, ext=${extension}, chars=${parsedContent.length}, fileUrl=${fileUrl}`,
+    );
+
+    return {
       documentId: created.id,
       title,
       fileUrl,
@@ -574,12 +577,6 @@ export class DocumentService {
       contentPreview: parsedContent.slice(0, previewLen),
       status: DocumentStatus.Draft,
     };
-
-    this.logger.log(
-      `文件解析并创建文档成功：documentId=${created.id}, title=${title}, ext=${extension}, chars=${parsedContent.length}, fileUrl=${fileUrl}`,
-    );
-
-    return result;
   }
 
   /**

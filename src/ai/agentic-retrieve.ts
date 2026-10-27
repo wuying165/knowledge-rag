@@ -105,7 +105,15 @@ export async function retrieveUntilRelevant(opts: {
   rewrite: ChatQueryRewriteService; // 评估切题 + 不足时改写
   onEval?: (data: RetrieveEval) => void; // 每次评估后回调（流式可推过程条）
   onRewrite?: (retryQuery: string) => void; // 即将用新词再查时回调
-}): Promise<{ hits: ChunkHit[]; eval: RetrieveEval; usedQuery: string }> {
+}): Promise<{
+  hits: ChunkHit[];
+  /** 未按切题过滤的原始命中，评测快照用 */
+  rawHits: ChunkHit[];
+  eval: RetrieveEval;
+  usedQuery: string;
+  /** 实际检索轮数（1 或 2） */
+  retrieveCount: number;
+}> {
   const first = await retrieveAndGrade({
     question: opts.question,
     query: opts.query,
@@ -116,7 +124,13 @@ export async function retrieveUntilRelevant(opts: {
   });
   opts.onEval?.(first.eval);
   if (first.eval.ok || first.eval.reason === 'error') {
-    return { hits: first.hits, eval: first.eval, usedQuery: first.usedQuery };
+    return {
+      hits: first.hits,
+      rawHits: first.rawHits,
+      eval: first.eval,
+      usedQuery: first.usedQuery,
+      retrieveCount: 1,
+    };
   }
 
   const retryQuery = await opts.rewrite.rewriteAfterRetrieve(
@@ -126,7 +140,13 @@ export async function retrieveUntilRelevant(opts: {
     first.rawHits,
   );
   if (!retryQuery) {
-    return { hits: [], eval: first.eval, usedQuery: first.usedQuery };
+    return {
+      hits: [],
+      rawHits: first.rawHits,
+      eval: first.eval,
+      usedQuery: first.usedQuery,
+      retrieveCount: 1,
+    };
   }
 
   opts.onRewrite?.(retryQuery);
@@ -141,7 +161,13 @@ export async function retrieveUntilRelevant(opts: {
     previousQuery: first.usedQuery,
   });
   opts.onEval?.(second.eval);
-  return { hits: second.hits, eval: second.eval, usedQuery: second.usedQuery };
+  return {
+    hits: second.hits,
+    rawHits: second.rawHits,
+    eval: second.eval,
+    usedQuery: second.usedQuery,
+    retrieveCount: 2,
+  };
 }
 
 function toEval(

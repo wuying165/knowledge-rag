@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button, Empty, Popconfirm, Space, Spin, Tag, Typography, message } from 'antd'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
+import DocumentEngagement from '../components/DocumentEngagement'
 import { documentApi } from '../api'
 import { ApiError } from '../api/client'
 import type { DocumentItem } from '../types'
@@ -69,6 +70,9 @@ export default function DocumentDetailPage() {
         <Button onClick={() => navigate('/documents')}>返回列表</Button>
         {can(user, 'document:edit') && writable ? (
           <Button onClick={() => navigate(`/documents/${id}/edit`)}>编辑</Button>
+        ) : null}
+        {writable ? (
+          <Button onClick={() => navigate(`/documents/${id}/versions`)}>版本</Button>
         ) : null}
         {can(user, 'document:edit') && writable && (doc.status === 0 || doc.status === 2) ? (
           <Button
@@ -140,6 +144,7 @@ export default function DocumentDetailPage() {
       <Space wrap>
         <Tag color={status?.color}>{status?.label}</Tag>
         <Tag color={vis.color}>{vis.label}</Tag>
+        {doc.categoryName ? <Tag>{doc.categoryName}</Tag> : null}
         <span style={{ color: '#8c8c8c' }}>更新于 {formatTime(doc.updatedAt)}</span>
       </Space>
       {doc.summary ? (
@@ -148,6 +153,7 @@ export default function DocumentDetailPage() {
         </Typography.Paragraph>
       ) : null}
       <DocumentMarkdown content={doc.content || ''} />
+      <DocumentEngagement doc={doc} onChange={setDoc} />
     </div>
   )
 }

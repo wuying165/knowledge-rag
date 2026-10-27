@@ -1,10 +1,17 @@
 import { del, get, patch, post, put, request } from './client'
 import type {
+  CategoryNode,
   ChatMessage,
   ChatResult,
   ChatSession,
   ChunkHit,
+  CommentItem,
   DocumentItem,
+  DocumentVersion,
+  NotificationItem,
+  ShareDocument,
+  ShareLink,
+  SharePreview,
   GraphEdge,
   GraphHit,
   GraphOverview,
@@ -63,6 +70,46 @@ export const documentApi = {
     post<DocumentItem>(`/documents/reviews/tasks/${taskId}/approve`, { reviewComment }),
   reject: (taskId: string, reviewComment: string) =>
     post<DocumentItem>(`/documents/reviews/tasks/${taskId}/reject`, { reviewComment }),
+  toggleLike: (id: string) =>
+    post<{ liked: boolean; likeCount: number }>(`/documents/${id}/likes`),
+  toggleFavorite: (id: string) =>
+    post<{ favorited: boolean; favouriteCount: number }>(`/documents/${id}/favorites`),
+  comments: (id: string) => get<CommentItem[]>(`/documents/${id}/comments`),
+  addComment: (id: string, content: string, parentId?: string) =>
+    post<{ comment: CommentItem; commentCount: number }>(`/documents/${id}/comments`, {
+      content,
+      parentId,
+    }),
+  removeComment: (id: string, commentId: string) =>
+    del<{ commentCount: number }>(`/documents/${id}/comments/${commentId}`),
+  shares: (id: string) => get<ShareLink[]>(`/documents/${id}/shares`),
+  createShare: (id: string, body: { password?: string; expireDays?: number }) =>
+    post<ShareLink>(`/documents/${id}/shares`, body),
+  revokeShare: (id: string, shareId: string) =>
+    del<{ id: string }>(`/documents/${id}/shares/${shareId}`),
+  versions: (id: string) => get<DocumentVersion[]>(`/documents/${id}/versions`),
+  restoreVersion: (id: string, versionId: string) =>
+    post<DocumentItem>(`/documents/${id}/versions/${versionId}/restore`),
+}
+
+export const categoryApi = {
+  tree: () => get<CategoryNode[]>('/categories/tree'),
+  create: (body: { name: string; parentId?: string; sort?: number; description?: string }) =>
+    post<CategoryNode>('/categories', body),
+  update: (id: string, body: { name?: string; parentId?: string; sort?: number; description?: string }) =>
+    put<CategoryNode>(`/categories/${id}`, body),
+  remove: (id: string) => del<{ id: string }>(`/categories/${id}`),
+}
+
+export const favoriteApi = {
+  list: (page = 1, pageSize = 20) =>
+    get<PageResult<DocumentItem>>(`/favorites?page=${page}&pageSize=${pageSize}`),
+}
+
+export const shareApi = {
+  preview: (code: string) => get<SharePreview>(`/shares/${code}`),
+  access: (code: string, password?: string) =>
+    post<ShareDocument>(`/shares/${code}/access`, { password }),
 }
 
 export const searchApi = {
@@ -154,6 +201,16 @@ export const roleApi = {
 
 export const permissionApi = {
   tree: () => get<PermissionNode[]>('/permissions/tree'),
+}
+
+export const notificationApi = {
+  list: (page = 1, pageSize = 20) =>
+    get<PageResult<NotificationItem>>(`/notifications?page=${page}&pageSize=${pageSize}`),
+  unreadCount: () => get<{ count: number }>('/notifications/unread-count'),
+  markRead: (id: string) => post<NotificationItem>(`/notifications/${id}/read`),
+  markAllRead: () => post<{ ok: boolean }>('/notifications/read-all'),
+  broadcast: (body: { title: string; content: string; userIds?: string[] }) =>
+    post<{ count: number }>('/notifications/broadcast', body),
 }
 
 export const teamApi = {

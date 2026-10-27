@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button, Empty, Form, Input, Select, Spin, Switch, message } from 'antd'
-import { documentApi, teamApi } from '../api'
+import { categoryApi, documentApi, teamApi } from '../api'
 import { ApiError } from '../api/client'
 import type { DocumentItem, TeamItem } from '../types'
 import { useAuth } from '../auth'
-import { canWriteDocument, flattenTeams, isAdmin } from '../utils'
+import { canWriteDocument, flattenCategories, flattenTeams, isAdmin } from '../utils'
 
 export default function DocumentEditPage() {
   const { id } = useParams()
@@ -16,6 +16,7 @@ export default function DocumentEditPage() {
   const [loading, setLoading] = useState(!isNew)
   const [forbidden, setForbidden] = useState(false)
   const [teams, setTeams] = useState<TeamItem[]>([])
+  const [categories, setCategories] = useState<{ value: string; label: string }[]>([])
   const [doc, setDoc] = useState<DocumentItem | null>(null)
 
   useEffect(() => {
@@ -23,6 +24,12 @@ export default function DocumentEditPage() {
       ? teamApi.tree().then(flattenTeams)
       : teamApi.mine()
     req.then(setTeams).catch(() => setTeams([]))
+    categoryApi
+      .tree()
+      .then((tree) =>
+        setCategories(flattenCategories(tree).map((item) => ({ value: item.id, label: item.label }))),
+      )
+      .catch(() => setCategories([]))
   }, [user])
 
   useEffect(() => {
@@ -40,6 +47,7 @@ export default function DocumentEditPage() {
           title: next.title,
           summary: next.summary,
           tags: next.tags,
+          categoryId: next.categoryId || undefined,
           isPublic: next.isPublic,
           teamId: next.teamId || undefined,
           content: next.content,
@@ -99,6 +107,7 @@ export default function DocumentEditPage() {
           title: string
           summary?: string
           tags?: string
+          categoryId?: string
           isPublic: boolean
           teamId?: string
           content: string
@@ -109,6 +118,7 @@ export default function DocumentEditPage() {
               content: values.content,
               summary: values.summary || undefined,
               tags: values.tags || undefined,
+              categoryId: values.categoryId || null,
               isPublic: values.isPublic,
               teamId: values.teamId || null,
             }
@@ -137,6 +147,9 @@ export default function DocumentEditPage() {
         </Form.Item>
         <Form.Item name="tags" label="标签">
           <Input placeholder="逗号分隔，如 SOP,发布" />
+        </Form.Item>
+        <Form.Item name="categoryId" label="分类">
+          <Select allowClear placeholder="选择分类" options={categories} />
         </Form.Item>
         <Form.Item
           name="isPublic"

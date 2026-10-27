@@ -1,4 +1,4 @@
-import type { AuthUser, TeamItem, TeamTreeNode } from './types'
+import type { AuthUser, CategoryNode, TeamItem, TeamTreeNode } from './types'
 
 export const DOC_STATUS: Record<number, { label: string; color: string }> = {
   0: { label: '草稿', color: 'default' },
@@ -48,6 +48,19 @@ export function visibilityMeta(doc: {
   if (doc.isPublic) return { label: '公开', color: 'success' as const }
   if (doc.teamId) return { label: '团队可见', color: 'blue' as const }
   return { label: '仅自己', color: 'default' as const }
+}
+
+export function flattenCategories(nodes: CategoryNode[], depth = 0): { id: string; name: string; label: string }[] {
+  const out: { id: string; name: string; label: string }[] = []
+  for (const node of nodes) {
+    out.push({
+      id: node.id,
+      name: node.name,
+      label: `${depth ? `${'—'.repeat(depth)} ` : ''}${node.name}`,
+    })
+    if (node.children?.length) out.push(...flattenCategories(node.children, depth + 1))
+  }
+  return out
 }
 
 export function flattenTeams(nodes: TeamTreeNode[] | unknown[]): TeamItem[] {

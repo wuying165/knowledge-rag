@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ClockCircleOutlined,
@@ -6,16 +6,17 @@ import {
   SearchOutlined,
 } from '@ant-design/icons'
 import { Button, Empty, Input, Pagination, Select, Space, Tag, message } from 'antd'
-import { searchApi } from '../api'
+import { categoryApi, searchApi } from '../api'
 import { ApiError } from '../api/client'
 import type { SearchHit } from '../types'
-import { DOC_STATUS, formatTime, safeHighlight, visibilityMeta } from '../utils'
+import { DOC_STATUS, flattenCategories, formatTime, safeHighlight, visibilityMeta } from '../utils'
 import { FileTypeIcon } from '../components/FileTypeIcon'
 
 export default function SearchPage() {
   const navigate = useNavigate()
   const [keyword, setKeyword] = useState('')
   const [categoryId, setCategoryId] = useState<string>()
+  const [categories, setCategories] = useState<{ value: string; label: string }[]>([])
   const [status, setStatus] = useState<number | undefined>()
   const [page, setPage] = useState(1)
   const [pageSize] = useState(10)
@@ -23,6 +24,15 @@ export default function SearchPage() {
   const [items, setItems] = useState<SearchHit[]>([])
   const [loading, setLoading] = useState(false)
   const [elapsed, setElapsed] = useState<number | null>(null)
+
+  useEffect(() => {
+    categoryApi
+      .tree()
+      .then((tree) =>
+        setCategories(flattenCategories(tree).map((item) => ({ value: item.id, label: item.label }))),
+      )
+      .catch(() => undefined)
+  }, [])
 
   async function runSearch(nextPage = 1) {
     const q = keyword.trim()
@@ -71,12 +81,13 @@ export default function SearchPage() {
         </Button>
       </div>
       <div className="kh-filters">
-        <Input
+        <Select
           allowClear
           style={{ width: 180 }}
-          placeholder="分类 ID"
+          placeholder="分类"
           value={categoryId}
-          onChange={(e) => setCategoryId(e.target.value || undefined)}
+          onChange={setCategoryId}
+          options={categories}
         />
         <Select
           allowClear

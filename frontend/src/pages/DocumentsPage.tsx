@@ -1,18 +1,27 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Checkbox, Input, Select, Space, Table, Tag, Upload, message } from 'antd'
-import { documentApi } from '../api'
+import { categoryApi, documentApi } from '../api'
 import { ApiError } from '../api/client'
 import type { DocumentItem } from '../types'
 import { useAuth } from '../auth'
-import { DOC_STATUS, can, canWriteDocument, formatTime, visibilityMeta } from '../utils'
+import {
+  DOC_STATUS,
+  can,
+  canWriteDocument,
+  flattenCategories,
+  formatTime,
+  visibilityMeta,
+} from '../utils'
 import { FileTypeIcon, fileTypeLabel } from '../components/FileTypeIcon'
 
-export default function DocumentsPage() {
+export default function DocumentsPage({ mine = false }: { mine?: boolean }) {
   const user = useAuth()
   const navigate = useNavigate()
   const [title, setTitle] = useState('')
   const [status, setStatus] = useState<number | undefined>()
+  const [categoryId, setCategoryId] = useState<string>()
+  const [categories, setCategories] = useState<{ value: string; label: string }[]>([])
   const [mineOnly, setMineOnly] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -29,7 +38,9 @@ export default function DocumentsPage() {
         pageSize,
         title: title.trim() || undefined,
         status,
-        authorId: mineOnly ? user?.userId : undefined,
+        categoryId,
+        mine: mine ? 1 : undefined,
+        authorId: !mine && mineOnly ? user?.userId : undefined,
       })
       setItems(res.items)
       setTotal(res.total)
@@ -42,13 +53,24 @@ export default function DocumentsPage() {
   }
 
   useEffect(() => {
+    categoryApi
+      .tree()
+      .then((tree) =>
+        setCategories(flattenCategories(tree).map((item) => ({ value: item.id, label: item.label }))),
+      )
+      .catch(() => undefined)
     void load(1)
-  }, [])
+    // 可见文档 / 我的文档是同一个组件，mine 变化时要重新查询
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mine])
 
   return (
     <div className="kh-page">
+      <h2 style={{ marginTop: 0 }}>{mine ? '我的文档' : '可见文档'}</h2>
       <p className="kh-access-hint">
-        列表只展示你能看的文档：公开、所在团队，以及自己写的。编辑 / 发布仅作者或管理员可用。
+        {mine
+          ? '这里是你创建的文档，包括草稿、待审核和已发布。'
+          : '列表只展示你能看的文档：公开、所在团队，以及自己写的。编辑 / 发布仅作者或管理员可用。'}
       </p>
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
@@ -61,6 +83,14 @@ export default function DocumentsPage() {
         />
         <Select
           allowClear
+          placeholder="分类"
+          style={{ width: 180 }}
+          value={categoryId}
+          onChange={setCategoryId}
+          options={categories}
+        />
+        <Select
+          allowClear
           placeholder="状态"
           style={{ width: 140 }}
           value={status}
@@ -70,12 +100,14 @@ export default function DocumentsPage() {
             label: v.label,
           }))}
         />
-        <Checkbox
-          checked={mineOnly}
-          onChange={(e) => setMineOnly(e.target.checked)}
-        >
-          仅我的
-        </Checkbox>
+        {mine ? null : (
+          <Checkbox
+            checked={mineOnly}
+            onChange={(e) => setMineOnly(e.target.checked)}
+          >
+            仅我的
+          </Checkbox>
+        )}
         <Button onClick={() => void load(1)}>查询</Button>
         {can(user, 'document:create') ? (
           <>
@@ -134,6 +166,12 @@ export default function DocumentsPage() {
             dataIndex: 'title',
             width: 100,
             render: (title: string) => fileTypeLabel(title),
+          },
+          {
+            title: '分类',
+            dataIndex: 'categoryName',
+            width: 140,
+            render: (value?: string | null) => value || '-',
           },
           {
             title: '状态',

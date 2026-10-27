@@ -18,7 +18,7 @@ import {
 } from '@ant-design/icons'
 import { Avatar, Badge, Dropdown, Layout, Menu, Tag, theme } from 'antd'
 import type { MenuProps } from 'antd'
-import { authApi, teamApi } from '../api'
+import { authApi, notificationApi, teamApi } from '../api'
 import { clearAuth, updateUser, useAuth } from '../auth'
 import { can, displayName, isAdmin, isReviewer } from '../utils'
 import { BrandLogo } from '../components/BrandLogo'
@@ -34,6 +34,7 @@ export default function AppLayout() {
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const [myTeams, setMyTeams] = useState<TeamItem[]>([])
+  const [unread, setUnread] = useState(0)
   const {
     token: { colorBgContainer },
   } = theme.useToken()
@@ -43,14 +44,32 @@ export default function AppLayout() {
     teamApi.mine().then(setMyTeams).catch(() => undefined)
   }, [])
 
+  useEffect(() => {
+    let timer = 0
+    const loadUnread = () => {
+      notificationApi
+        .unreadCount()
+        .then((res) => setUnread(res.count))
+        .catch(() => undefined)
+    }
+    loadUnread()
+    timer = window.setInterval(loadUnread, 30000)
+    return () => window.clearInterval(timer)
+  }, [location.pathname])
+
   const topKey = useMemo(() => {
-    if (location.pathname.startsWith('/documents') || location.pathname.startsWith('/admin/reviews')) {
+    if (
+      location.pathname.startsWith('/documents') ||
+      location.pathname.startsWith('/favorites') ||
+      location.pathname.startsWith('/admin/reviews')
+    ) {
       return '/documents'
     }
     if (location.pathname.startsWith('/search')) return '/search'
     if (location.pathname.startsWith('/chat')) return '/chat'
     if (location.pathname.startsWith('/graph')) return '/graph'
     if (location.pathname.startsWith('/profile')) return '/profile'
+    if (location.pathname.startsWith('/notifications')) return '/notifications'
     if (location.pathname.startsWith('/admin')) return '/admin'
     return '/dashboard'
   }, [location.pathname])
@@ -80,6 +99,8 @@ export default function AppLayout() {
     if (topKey === '/documents') {
       const items: MenuItem[] = [
         { key: '/documents', icon: <ReadOutlined />, label: '可见文档' },
+        { key: '/documents/mine', icon: <FileTextOutlined />, label: '我的文档' },
+        { key: '/favorites', icon: <ReadOutlined />, label: '我的收藏' },
         { key: '/documents/new', icon: <FileTextOutlined />, label: '新建文档' },
       ]
       if (isReviewer(user)) {
@@ -113,6 +134,12 @@ export default function AppLayout() {
         items: [{ key: '/profile', icon: <UserOutlined />, label: '账号资料' }],
       }
     }
+    if (topKey === '/notifications') {
+      return {
+        title: '通知',
+        items: [{ key: '/notifications', icon: <BellOutlined />, label: '全部通知' }],
+      }
+    }
     if (topKey === '/admin') {
       return {
         title: '系统管理',
@@ -120,6 +147,8 @@ export default function AppLayout() {
           { key: '/admin/users', icon: <UserOutlined />, label: '用户管理' },
           { key: '/admin/roles', icon: <SafetyCertificateOutlined />, label: '角色权限' },
           { key: '/admin/teams', icon: <TeamOutlined />, label: '团队管理' },
+          { key: '/admin/categories', icon: <ApartmentOutlined />, label: '分类管理' },
+          { key: '/admin/notifications', icon: <BellOutlined />, label: '发送通知' },
         ],
       }
     }
@@ -144,14 +173,12 @@ export default function AppLayout() {
           onClick={({ key }) => navigate(key)}
         />
         <div className="kh-header-right">
-          {isReviewer(user) ? (
-            <Badge size="small" className="kh-bell">
-              <BellOutlined
-                style={{ fontSize: 18, cursor: 'pointer' }}
-                onClick={() => navigate('/admin/reviews')}
-              />
-            </Badge>
-          ) : null}
+          <Badge count={unread} size="small" className="kh-bell">
+            <BellOutlined
+              style={{ fontSize: 18, cursor: 'pointer' }}
+              onClick={() => navigate('/notifications')}
+            />
+          </Badge>
           <Dropdown
             menu={{
               items: [
